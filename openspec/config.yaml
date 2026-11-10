@@ -1,0 +1,45 @@
+schema: spec-driven
+
+context: |
+  pi-factory is a single always-on Python process (managed with uv) that runs on a
+  free-tier Oracle ARM VM (2 cores, 12 GB RAM) shared with the production pi-relay
+  service. Keep the idle memory and CPU footprint small and dependencies minimal.
+  It drives the separately installed `pi` coding-agent binary as a child process;
+  it never embeds, patches or reinstalls pi.
+  v1 integrates Linear (task board) and GitHub (code host). Azure DevOps will be
+  added later, so tracker and code-host access stay behind small adapter interfaces.
+  The factory never merges PRs, never pushes to a base branch and never deploys.
+  Secrets (Linear, GitHub) are never passed to pi or check commands (environment,
+  arguments, prompts) and never written into worktrees. v1 runs as the same Unix
+  user as pi, so on-disk secrets stay readable by the agent: an accepted risk.
+
+# Project context (optional)
+# Add only constraints that should guide OpenSpec artifacts and workflows.
+# Include constraints an agent cannot infer by reading the code.
+# Keep general project documentation and discoverable codebase facts out.
+# Example:
+#   context: |
+#     Designs and tasks must cover Windows, macOS, and Linux
+#     Write all artifacts in Spanish
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

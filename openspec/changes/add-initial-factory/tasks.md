@@ -1,0 +1,127 @@
+# Tasks
+
+## 1. Project scaffolding
+
+- [ ] 1.1 Create the uv project (`pyproject.toml` with `requires-python >= 3.12`, no runtime dependencies, pytest as a dev dependency, `pi-factory` console script → `pi_factory.cli:main`, `src/pi_factory/` layout per design D3). Verify that `uv sync && uv run pi-factory --help` prints usage.
+- [ ] 1.2 Add `AGENTS.md` (scope rules, how to run checks, "never touch production state") and `.gitignore`. Add the check commands `uv run pytest`, `uv run ruff check` and `uv run ruff format --check` (ruff as a dev dependency). Verify that all three run cleanly on the empty package.
+
+## 2. Configuration and secrets
+
+- [ ] 2.1 Implement `config.py`: typed dataclasses, defaults from the specs, strict validation (unknown keys reported with their full dotted path, required fields, types, at least one repo and one check per repo). Verify with tests covering every `factory-config` scenario, including the `repos.pi-relay.chekcs` typo.
+- [ ] 2.2 Implement `secrets.py`: load the env file, refuse anything other than mode 0600, expose secrets only through accessor functions, and redact secret values from exception strings. Verify with tests for the open-permissions refusal and the redaction of a secret value from a raised error.
+- [ ] 2.3 Write `docs/configuration.md` with an annotated example `factory.toml` and `secrets.env`. Verify that a test loads the documented example and that it validates.
+
+## 3. Run records
+
+- [ ] 3.1 Implement `runs.py`: the run directory layout, the atomic run record (temp file, fsync, rename), the factory-comment ID list, archive and retention. Verify with tests for an atomic write that survives a simulated crash, archive on cleanup, the 31-day prune, and Blocked runs never being pruned.
+- [ ] 3.2 Add structured stage logging to stdout (one line per event, with the issue identifier). Verify with a test that captures the log lines for a scripted phase.
+
+## 4. pi RPC driver
+
+- [ ] 4.1 Write `tests/fake_pi.py`, a fake pi that speaks RPC JSONL with these scripted behaviours: success with text, edits files, error stop reason, hangs, exits mid-turn, sends an extension-UI `confirm`, reports usage. Verify that it is driven by the tests in 4.2.
+- [ ] 4.2 Implement `pi_rpc.py`:
+  - build the command line from design D6 (session dir and ID, `--no-approve`, model, thinking, tools);
+  - spawn with the scrubbed environment from D7 in its own process group;
+  - `prompt` and wait for `agent_settled`;
+  - fetch the final text and usage;
+  - detect failures;
+  - auto-answer extension-UI requests;
+  - feed a ring buffer of output;
+  - escalate on timeout and cancel (abort → stdin close and SIGTERM → SIGKILL).
+
+  Verify with tests for every `agent-sessions` scenario against `fake_pi.py`, including an `env` check showing that no `PI_FACTORY_*` variable reaches the child.
+- [ ] 4.3 Confirm pi 1.5.0's actual behaviour on the VM, read-only and in a scratch directory, with no factory state:
+  - the RPC event and command names used in D6;
+  - that `--session-dir` with `--session-id` creates a new session and reopens it;
+  - that a session killed mid-turn can be reopened and continued;
+  - that `--tools read,grep,find,ls` hides `bash`, `edit` and `write`.
+
+  Record the findings in `docs/pi-compat.md` and adjust `fake_pi.py` to match. Verify with the opt-in `PI_FACTORY_SMOKE=1` test passing on the VM.
+
+## 5. Tracker adapter (Linear)
+
+- [ ] 5.1 Define the `Tracker` protocol: list relevant issues, get issue states by ID, set state, assign, post comment, list comments, check that states and labels exist. Then write the in-process fake Linear GraphQL server used by the tests. Verify that the protocol has a fake-backed contract test suite.
+- [ ] 5.2 Implement `tracker/linear.py`: GraphQL over `urllib`, client-credentials token fetch, caching and refresh on expiry or 401 with a single retry, API-key fallback, state and owner ID lookup at startup. Verify with contract tests against the fake server and tests for every `service-credentials` Linear scenario.
+
+## 6. Code host adapter (GitHub) and git
+
+- [ ] 6.1 Implement `gitops.py`: bare cached clone, fetch, worktree add and remove on Linear's `branchName`, commit as the bot with the `ISSUE: title (round N)` message, push through the scoped credential helper, and refusal to push the base branch. Verify with tests against a temporary bare remote, including that no token appears in `.git/config` or in `git remote -v`, and that a push of the base branch is refused.
+- [ ] 6.2 Define the `CodeHost` protocol and implement `codehost/github.py`: find an open PR by head branch, create a PR, update its body, read `mergeable` with one lazy retry, check repo access. Write a fake GitHub server for it. Verify with contract tests, including "a second create attempt finds the existing PR".
+
+## 7. Design phase
+
+- [ ] 7.1 Write `prompts/design.md` and `prompts/format_fix.md`. Implement `phases/design.py`:
+  - prompt assembly (issue, comments, previous design, comments since);
+  - read-only tool allowlist;
+  - the `git status` cleanliness check;
+  - section validation, with one format-fix turn;
+  - post the comment and record its ID;
+  - move to Design Review and assign the owner.
+
+  Verify with tests for every `design-phase` scenario, using the fakes.
+
+## 8. Build phase
+
+- [ ] 8.1 Implement `phases/build.py`:
+  - setup command;
+  - implementer turn with the build prompt (`prompts/build.md`);
+  - ordered checks with per-command timeout and trimmed output capture;
+  - up to N repair turns (`prompts/repair.md`) on the same live session, with a 16 KiB tail;
+  - Blocked on exhaustion.
+
+  Verify with tests for the `build-phase` setup, checks and repair scenarios.
+- [ ] 8.2 Add commit, push, PR create or update with the PR body (issue link, design summary, checks table, repair count, token usage), the In Review transition and comment, and the conflict note when the PR is not mergeable. Verify with tests for the "new PR", "never push to base" and "base moved on" scenarios.
+- [ ] 8.3 Add continuation: an existing PR plus Ready for Build continues on the same worktree and branch, with the comments since the last build as instructions. Verify with a test for the "review feedback addressed" scenario showing a second commit on the same PR.
+
+## 9. Scheduler and lifecycle
+
+- [ ] 9.1 Implement `scheduler.py`:
+  - poll interval with exponential backoff capped at 15 minutes;
+  - repo-label validation;
+  - priority-then-age ordering;
+  - per-repo and global slots;
+  - worker threads;
+  - state transitions owned by the factory only.
+
+  Verify with tests for every `work-intake` scenario and the transition scenarios in `task-lifecycle`.
+- [ ] 9.2 Add cancellation (re-reading the state of active issues each poll, stopping the worker without posting anything) and cleanup on Done or Canceled (remove the worktree and branch, archive the run, daily retention sweep). Verify with tests for the "moved to Backlog mid-build", "canceled mid-design" and "PR merged" scenarios.
+- [ ] 9.3 Add the startup check for required Linear states and the free-disk guard (Blocked when less than 2 GB is free before creating a worktree). Verify with tests for a missing state (non-zero exit) and for low disk.
+
+## 10. Recovery
+
+- [ ] 10.1 Implement `recovery.py`:
+  - startup reconciliation before dispatch;
+  - pi-turn resume via the same session ID with `prompts/resume.md`;
+  - idempotent replay of setup, checks, commit, push and PR (comment marker lookup, existing-PR lookup);
+  - at most one resume per phase;
+  - Blocked when there is no run record or the session can't be loaded.
+
+  Verify with tests for every `run-recovery` scenario, using `fake_pi.py`'s exit-mid-turn behaviour.
+- [ ] 10.2 Handle SIGTERM: stop taking new work, close pi stdin, leave run records at their current step, and exit within 30 s. Verify with a test that sends SIGTERM mid-turn, restarts, and sees the session resumed.
+
+## 11. Dashboard
+
+- [ ] 11.1 Implement `dashboard.py`:
+  - `ThreadingHTTPServer` on the configured loopback address;
+  - GET only (405 otherwise);
+  - an overview page with repos, active tasks, queue, recent runs and poll errors;
+  - issue pages with 200-line live tails;
+  - 10-second meta refresh, HTML-escaped output, no secrets.
+
+  Verify with tests for every `status-dashboard` scenario that can run locally: 405 on POST, active build shown, an error shown without a token, bound only to 127.0.0.1.
+
+## 12. CLI, packaging and deployment
+
+- [ ] 12.1 Implement `pi-factory check` (preflight per design D14) and `pi-factory run`, which runs the same checks and then the scheduler, recovery and dashboard. Verify with a test where `check` fails on each missing prerequisite and passes when all the fakes are set up.
+- [ ] 12.2 Add `deploy/pi-factory.service` (systemd unit per design D12) and write `docs/operations.md`: Linear setup (states, public team, `repo` label group, OAuth app, GitHub integration), GitHub machine account and branch protection, VM install with uv, secrets file, `tailscale serve`, update (`git pull && uv sync && systemctl restart`), rollback and token rotation. Verify that `systemd-analyze verify deploy/pi-factory.service` passes on the VM, and that the guide is followed end to end in 13.1.
+- [ ] 12.3 Write `README.md` covering the flow (states table), architecture summary and links to the docs. Verify that every link resolves and that the states table matches the `task-lifecycle` spec.
+
+## 13. Integration checks
+
+- [ ] 13.1 Deploy to the VM following `docs/operations.md`. Check that the idle RSS of the factory process is at most 60 MB (`ps -o rss`). Check that the dashboard is reachable only through the tailnet URL.
+- [ ] 13.2 Run one throwaway issue end to end on a scratch GitHub repository, going through design, Design Review, Ready for Build, In Review and a merge to Done. Exercise one redesign, one continuation after review, one cancellation and one `systemctl restart` mid-build. Verify that Linear, the PR and the run directory each match the specs.
+
+## Workflow follow-up
+
+- Point the factory at the first real repository after 13.2 passes.
+- Archive this change with `/opsx:archive` once implemented and accepted.
