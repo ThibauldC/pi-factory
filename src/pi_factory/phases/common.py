@@ -23,6 +23,8 @@ from ..ring import RingBuffer
 from ..runs import RunRecord, RunStore
 from ..tracker.base import (
     BLOCKED,
+    BUILDING,
+    DESIGNING,
     READY_FOR_BUILD,
     READY_FOR_DESIGN,
     Comment,
@@ -90,8 +92,18 @@ class Task:
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
-    def identifier(self) -> str:
-        return self.issue.identifier
+    def key(self) -> str:
+        """The issue key (``pi-relay-123``): run directory, scheduler slot, session IDs."""
+        return self.issue.key
+
+    @property
+    def ref(self) -> str:
+        """The issue reference (``pi-relay#123``) for logs and the dashboard."""
+        return self.issue.ref
+
+    @property
+    def worktree_name(self) -> str:
+        return str(self.issue.number)
 
     # -- control from other threads -----------------------------------------------------
     def cancel(self) -> None:
@@ -134,7 +146,8 @@ class Task:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "issue": self.identifier,
+            "issue": self.ref,
+            "key": self.key,
             "title": self.issue.title,
             "url": self.issue.url,
             "repo": self.repo.key,
@@ -170,12 +183,12 @@ def format_comments(comments: list[Comment]) -> str:
 
 
 # -- factory comments --------------------------------------------------------------------------
-def marker(issue: str, key: str) -> str:
-    return f"pi-factory `{issue}/{key}`"
+def marker(issue_key: str, key: str) -> str:
+    return f"pi-factory `{issue_key}/{key}`"
 
 
 def strip_marker(body: str) -> str:
-    """The comment text without its trailing ``— pi-factory `ISSUE/key``` marker line."""
+    """The comment text without its trailing ``— pi-factory `KEY/step``` marker line."""
     lines = body.rstrip().splitlines()
     if lines and lines[-1].startswith("— pi-factory `"):
         lines.pop()
@@ -183,34 +196,48 @@ def strip_marker(body: str) -> str:
 
 
 def is_factory_comment(comment: Comment, rec: RunRecord) -> bool:
-    return comment.id in rec.factory_comment_ids or f"pi-factory `{rec.issue}/" in comment.body
+    return (
+        comment.is_bot
+        or comment.id in rec.factory_comment_ids
+        or f"pi-factory `{rec.issue}/" in comment.body
+    )
 
 
 def human_comments(comments: list[Comment], rec: RunRecord) -> list[Comment]:
-    """Comments the factory did not write: the only text it reads, and only as context."""
-    return [c for c in comments if not is_factory_comment(c, rec)]
+    """Comments the factory did not write and that come from a trusted author (the issue's
+    owner, a member or a collaborator): the only text it reads, and only as context."""
+    return [c for c in comments if c.trusted and not is_factory_comment(c, rec)]
 
 
-def post_comment_once(
-    tracker: Tracker, issue: Issue, identifier: str, key: str, body: str
-) -> Comment:
+def post_comment_once(tracker: Tracker, issue: Issue, key: str, body: str) -> Comment:
     """Post ``body`` once. A marker line (run + step) lets a replay find its earlier post."""
-    tag = marker(identifier, key)
-    for existing in tracker.list_comments(issue.id)[-COMMENT_LOOKBACK:]:
-        if tag in existing.body:
+    tag = marker(issue.key, key)
+    for existing in tracker.list_comments(issue)[-COMMENT_LOOKBACK:]:
+        if existing.is_bot and tag in existing.body:
             return existing
-    return tracker.post_comment(issue.id, f"{body.rstrip()}\n\n— {tag}")
+    return tracker.post_comment(issue, f"{body.rstrip()}\n\n— {tag}")
 
 
 def post_comment(deps: Deps, issue: Issue, rec: RunRecord, key: str, body: str) -> Comment:
     """Post a run comment once and keep its id and text in the run record."""
-    comment = post_comment_once(deps.tracker, issue, rec.issue, key, body)
+    comment = post_comment_once(deps.tracker, issue, key, body)
     if comment.id not in rec.factory_comment_ids:
         rec.factory_comment_ids.append(comment.id)
         deps.runs.save(rec)
         deps.runs.write_posted(rec.issue, f"{key}.md", comment.body)
-        logs.event("comment_posted", rec.issue, key=key, comment=comment.id)
+        logs.event("comment_posted", rec.ref, key=key, comment=comment.id)
     return comment
+
+
+def swap_state(deps: Deps, rec: RunRecord, issue: Issue, new: str) -> None:
+    """Move the issue to ``new``: the intended swap is written to the run record first, so a
+    crash between adding the new label and removing the old one can be repaired."""
+    old = issue.state_labels
+    rec.swap = {"from": old[0].lower(), "to": new} if len(old) == 1 else None
+    deps.runs.save(rec)
+    deps.tracker.set_state(issue, new)
+    rec.swap = None
+    deps.runs.save(rec)
 
 
 def block_issue(
@@ -227,17 +254,18 @@ def block_issue(
     if details.strip():
         body += f"\n\n```\n{details.strip()}\n```"
     body += (
-        f"\n\nTo retry, move this issue back to **{retry}** (or to Ready for Design to redesign)."
+        f"\n\nTo retry, replace the `factory:blocked` label with `{retry}` "
+        f"(or with `{READY_FOR_DESIGN}` to redesign)."
     )
     post_comment(deps, issue, rec, f"blocked-{rec.phase}-{rec.round}", body)
     if task is not None:
         task.finishing = True
-    deps.tracker.set_state(issue.id, BLOCKED)
-    deps.tracker.assign_owner(issue.id)
+    swap_state(deps, rec, issue, BLOCKED)
+    deps.tracker.assign_owner(issue)
     rec.outcome = "blocked"
     rec.outcome_detail = reason[:500]
     deps.runs.save(rec)
-    logs.event("blocked", rec.issue, phase=rec.phase, round=rec.round, reason=reason[:200])
+    logs.event("blocked", rec.ref, phase=rec.phase, round=rec.round, reason=reason[:200])
 
 
 # -- pi sessions ---------------------------------------------------------------------------------
@@ -262,7 +290,7 @@ def open_session(
     settings = deps.config.phase_settings(task.repo.key, rec.phase)
     session = PiSession(
         deps.config.pi_path,
-        deps.git.worktree_path(task.repo, rec.issue),
+        deps.git.worktree_path(task.repo, task.worktree_name),
         sdir,
         sid,
         model=settings.model,
@@ -270,12 +298,12 @@ def open_session(
         tools=tools,
         env_passthrough=task.repo.env_passthrough,
         ring=task.agent_ring,
-        issue=rec.issue,
+        issue=rec.ref,
         **kw,
     )
     task.attach_session(session)
     session.start()
-    logs.event("pi_started", rec.issue, pid=session.pid, session=sid, phase=rec.phase)
+    logs.event("pi_started", rec.ref, pid=session.pid, session=sid, phase=rec.phase)
     return session
 
 
@@ -319,7 +347,7 @@ def run_turn(
     deps.runs.save(rec)
     logs.event(
         "pi_turn_end",
-        rec.issue,
+        rec.ref,
         phase=rec.phase,
         ok=result.ok,
         failure=result.failure,
@@ -371,19 +399,22 @@ def set_step(deps: Deps, task: Task, rec: RunRecord, step: str) -> None:
 
 
 def begin_phase(deps: Deps, task: Task, *, resume: bool = False) -> RunRecord:
-    """Open (or, when recovering, reload) the run record and, for a fresh phase entry, move
-    the issue to Designing/Building *before* any pi process is launched."""
-    from ..tracker.base import BUILDING, DESIGNING
-
+    """Open (or, when recovering, reload) the run record, read the issue's comments, and for
+    a fresh phase entry move the issue to Designing/Building *before* any pi process is
+    launched."""
     issue = task.issue
-    rec = deps.runs.load(issue.identifier)
+    rec = deps.runs.load(issue.key)
     if rec is None:
-        rec = deps.runs.create(issue.identifier, task.repo.key)
+        rec = deps.runs.create(issue.key, task.repo.key)
     rec.repo = task.repo.key
-    rec.issue_id = issue.id
-    rec.branch = issue.branch_name
+    rec.issue_number = issue.number
+    if rec.branch:
+        issue.branch_name = rec.branch  # the branch name stays stable if the title changes
+    else:
+        rec.branch = issue.branch_name
     rec.title = issue.title
     rec.issue_url = issue.url
+    issue.comments = deps.tracker.list_comments(issue)  # comments are read when a phase starts
     if not resume:
         rec.phase = task.phase
         rec.rounds[task.phase] = rec.rounds.get(task.phase, 0) + 1
@@ -391,9 +422,11 @@ def begin_phase(deps: Deps, task: Task, *, resume: bool = False) -> RunRecord:
         rec.step = ""
         rec.outcome = ""
         rec.outcome_detail = ""
+        rec.swap = None
+        rec.repairs_used = 0
         deps.runs.save(rec)
-        deps.tracker.set_state(issue.id, DESIGNING if task.phase == "design" else BUILDING)
-        logs.event("state_change", issue.identifier, to=task.phase)
+        swap_state(deps, rec, issue, DESIGNING if task.phase == "design" else BUILDING)
+        logs.event("state_change", issue.ref, to=task.phase)
     else:
         deps.runs.save(rec)
     task.round = rec.round

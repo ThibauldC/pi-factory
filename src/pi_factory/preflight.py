@@ -11,14 +11,9 @@ from pathlib import Path
 
 from .childenv import build_child_env
 from .codehost.base import CodeHost, CodeHostError
-from .config import FactoryConfig
+from .config import FactoryConfig, RepoConfig
 from .secrets import Secrets, SecretsError
 from .tracker.base import Tracker, TrackerError
-
-GITHUB_INTEGRATION_REMINDER = (
-    "Linear's GitHub integration cannot be verified from here: make sure it is installed for "
-    "the factory repositories, or issues will stay In Review after a PR is merged."
-)
 
 
 @dataclass
@@ -54,17 +49,11 @@ def check_pi(cfg: FactoryConfig) -> CheckResult:
 
 
 def check_secrets(cfg: FactoryConfig, secrets: Secrets) -> CheckResult:
-    needed = [secrets.github_token]
-    if cfg.linear.auth == "api_key":
-        needed.append(secrets.linear_api_key)
-    else:
-        needed += [secrets.linear_client_id, secrets.linear_client_secret]
-    for accessor in needed:
-        try:
-            accessor()
-        except SecretsError as exc:
-            return CheckResult("secrets", False, str(exc))
-    return CheckResult("secrets", True, f"{len(needed)} required secret(s) present")
+    try:
+        secrets.github_token()
+    except SecretsError as exc:
+        return CheckResult("secrets", False, str(exc))
+    return CheckResult("secrets", True, "the GitHub token is present")
 
 
 def check_directories(cfg: FactoryConfig) -> CheckResult:
@@ -78,14 +67,21 @@ def check_directories(cfg: FactoryConfig) -> CheckResult:
     return CheckResult("directories", True, "state, worktree and clone directories are writable")
 
 
-def check_linear(cfg: FactoryConfig, tracker: Tracker) -> CheckResult:
+def check_tracker(cfg: FactoryConfig, tracker: Tracker) -> list[CheckResult]:
+    """The factory:* labels in every repository and the owner. Missing priority labels are
+    only a warning."""
+    repos = list(cfg.repos.values())
     try:
-        problems = tracker.check_setup(list(cfg.repos))
+        problems = tracker.check_setup(repos)
+        warnings = tracker.setup_warnings(repos)
     except (TrackerError, SecretsError) as exc:
-        return CheckResult("linear", False, f"cannot query Linear: {exc}")
+        return [CheckResult("github issues", False, f"cannot query GitHub issues: {exc}")]
     if problems:
-        return CheckResult("linear", False, "; ".join(problems))
-    return CheckResult("linear", True, "workflow states, repo labels and owner exist")
+        results = [CheckResult("github issues", False, "; ".join(problems))]
+    else:
+        results = [CheckResult("github issues", True, "factory:* labels and the owner exist")]
+    results.extend(CheckResult("github issues", True, f"warning: {w}") for w in warnings)
+    return results
 
 
 def check_github(cfg: FactoryConfig, codehost: CodeHost) -> list[CheckResult]:
@@ -96,9 +92,30 @@ def check_github(cfg: FactoryConfig, codehost: CodeHost) -> list[CheckResult]:
         except (CodeHostError, SecretsError) as exc:
             problem = f"cannot query GitHub: {exc}"
         results.append(
-            CheckResult(f"github:{key}", problem is None, problem or "bot has push access")
+            CheckResult(
+                f"github:{key}", problem is None, problem or "bot has push access, issues enabled"
+            )
         )
+        if problem is None:
+            results.append(check_base_branch(key, repo, codehost))
     return results
+
+
+def check_base_branch(key: str, repo: RepoConfig, codehost: CodeHost) -> CheckResult:
+    """`Closes #N` only fires when the PR merges into the default branch: warn otherwise."""
+    name = f"base-branch:{key}"
+    try:
+        default = codehost.default_branch(repo)
+    except (CodeHostError, SecretsError) as exc:
+        return CheckResult(name, False, f"cannot read the default branch: {exc}")
+    if default and default != repo.base_branch:
+        return CheckResult(
+            name,
+            True,
+            f"warning: base_branch '{repo.base_branch}' is not the default branch '{default}', "
+            "so `Closes #N` in a PR will not close the issue when it merges",
+        )
+    return CheckResult(name, True, f"'{repo.base_branch}' is the default branch")
 
 
 def run_checks(
@@ -111,6 +128,6 @@ def run_checks(
     """Run every check (no early exit, so one pass reports everything that is wrong)."""
     results = [check_secrets(cfg, secrets), pi_checker(cfg), check_directories(cfg)]
     if results[0].ok:
-        results.append(check_linear(cfg, tracker))
+        results.extend(check_tracker(cfg, tracker))
         results.extend(check_github(cfg, codehost))
     return results

@@ -36,17 +36,19 @@ def test_group_readable_refused(tmp_path):
 def test_loads_and_exposes_via_accessors(tmp_path):
     p = write(
         tmp_path,
-        "# comment\nPI_FACTORY_LINEAR_CLIENT_ID=cid-12345\n"
-        'PI_FACTORY_LINEAR_CLIENT_SECRET="csecret-1"\nexport PI_FACTORY_GITHUB_TOKEN=ghp_token99\n',
+        '# comment\nexport PI_FACTORY_GITHUB_TOKEN=ghp_token99\nOTHER="quoted value"\n',
         0o600,
     )
     s = sec.load_secrets(p)
-    assert s.linear_client_id() == "cid-12345"
-    assert s.linear_client_secret() == "csecret-1"
     assert s.github_token() == "ghp_token99"
     assert "ghp_token99" not in repr(s)
-    with pytest.raises(sec.SecretsError, match="PI_FACTORY_LINEAR_API_KEY"):
-        s.linear_api_key()
+    assert s.has("OTHER") and not s.has("MISSING")
+
+
+def test_missing_token_is_reported_by_name(tmp_path):
+    s = sec.load_secrets(write(tmp_path, "A=b\n", 0o600))
+    with pytest.raises(sec.SecretsError, match="PI_FACTORY_GITHUB_TOKEN"):
+        s.github_token()
 
 
 def test_missing_file(tmp_path):

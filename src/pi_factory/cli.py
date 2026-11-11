@@ -15,7 +15,7 @@ from .service import build_services, report, run_service
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pi-factory",
-        description="Turn Linear issues into reviewed GitHub PRs by driving pi.",
+        description="Turn GitHub issues into reviewed pull requests by driving pi.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (

@@ -18,7 +18,7 @@ $check_list
 
 ## The issue
 
-Identifier: $identifier
+GitHub issue: $identifier
 Title: $title
 
 $description

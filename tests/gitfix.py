@@ -45,8 +45,11 @@ def push_to_remote(root: Path, remote: Path, filename: str, content: str, messag
 
 def make_config(root: Path, repos: dict[str, Path | str], **repo_extra) -> FactoryConfig:
     data = {
-        "linear": {"team": "THI", "owner": "owner@example.com"},
-        "github": {"bot_name": "factory-bot", "bot_email": "bot@users.noreply.github.com"},
+        "github": {
+            "owner": "olivia",
+            "bot_name": "factory-bot",
+            "bot_email": "bot@users.noreply.github.com",
+        },
         "factory": {
             "state_root": str(root / "state"),
             "worktree_root": str(root / "worktrees"),
@@ -54,7 +57,8 @@ def make_config(root: Path, repos: dict[str, Path | str], **repo_extra) -> Facto
             "pi_path": "/bin/true",
         },
         "repos": {
-            key: {"url": str(url), "checks": ["true"], **repo_extra} for key, url in repos.items()
+            key: {"repo": f"owner/{key}", "url": str(url), "checks": ["true"], **repo_extra}
+            for key, url in repos.items()
         },
     }
     return parse_config(data)

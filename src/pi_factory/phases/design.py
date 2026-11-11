@@ -22,6 +22,7 @@ from .common import (
     session_exists,
     set_step,
     strip_marker,
+    swap_state,
 )
 
 SECTIONS = ("Approach", "Files likely touched", "Acceptance checks", "Open questions")
@@ -90,7 +91,7 @@ def build_prompt(deps: Deps, task: Task, rec) -> str:
         "design",
         repo=task.repo.key,
         base_branch=task.repo.base_branch,
-        identifier=task.issue.identifier,
+        identifier=task.issue.ref,
         title=task.issue.title,
         description=task.issue.description or "(no description)",
         comments=format_comments(comments),
@@ -109,12 +110,12 @@ def _require_clean_worktree(deps: Deps, wt) -> None:
 def run_design(deps: Deps, task: Task, rec, *, resume: bool = False) -> None:
     """Run (or, with ``resume``, continue) one design round for ``task``."""
     issue = task.issue
-    logs.event("phase_start", issue.identifier, phase="design", round=rec.round, resume=resume)
+    logs.event("phase_start", issue.ref, phase="design", round=rec.round, resume=resume)
     task.check_interrupt()
     if resume and _adopt_posted_design(deps, task, rec):
         _finish(deps, task, rec)
         return
-    wt = deps.git.ensure_worktree(task.repo, issue.identifier, issue.branch_name)
+    wt = deps.git.ensure_worktree(task.repo, task.worktree_name, issue.branch_name)
 
     set_step(deps, task, rec, "pi_turn")
     session = open_session(deps, task, rec, tools=deps.config.design.tools)
@@ -131,7 +132,7 @@ def run_design(deps: Deps, task: Task, rec, *, resume: bool = False) -> None:
         text = result.text
         problems = validate_design(text)
         if problems:
-            logs.event("design_format_fix", issue.identifier, problems="; ".join(problems))
+            logs.event("design_format_fix", issue.ref, problems="; ".join(problems))
             fix = render_prompt(
                 "format_fix",
                 problems="\n".join(f"- {p}" for p in problems),
@@ -173,8 +174,8 @@ def _record_design(deps: Deps, rec, comment_id: str, created_at: str, body: str)
 def _adopt_posted_design(deps: Deps, task: Task, rec) -> bool:
     """Recovery: the design comment for this round was already posted before the restart."""
     tag = marker(rec.issue, f"design-{rec.round}")
-    for c in deps.tracker.list_comments(task.issue.id):
-        if tag in c.body:
+    for c in deps.tracker.list_comments(task.issue):
+        if c.is_bot and tag in c.body:
             _record_design(deps, rec, c.id, c.created_at, strip_marker(c.body))
             if c.id not in rec.factory_comment_ids:
                 rec.factory_comment_ids.append(c.id)
@@ -185,9 +186,9 @@ def _adopt_posted_design(deps: Deps, task: Task, rec) -> bool:
 def _finish(deps: Deps, task: Task, rec) -> None:
     issue = task.issue
     task.finishing = True
-    deps.tracker.set_state(issue.id, DESIGN_REVIEW)
-    deps.tracker.assign_owner(issue.id)
+    swap_state(deps, rec, issue, DESIGN_REVIEW)
+    deps.tracker.assign_owner(issue)
     rec.outcome = "designed"
     rec.step = ""
     deps.runs.save(rec)
-    logs.event("phase_end", issue.identifier, phase="design", round=rec.round, outcome="designed")
+    logs.event("phase_end", issue.ref, phase="design", round=rec.round, outcome="designed")

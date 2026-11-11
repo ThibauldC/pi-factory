@@ -15,15 +15,15 @@ def session(fake, tmp_path, **kw):
     kw.setdefault("abort_grace", 0.5)
     kw.setdefault("term_grace", 0.5)
     return PiSession(
-        fake.path, cwd, tmp_path / "sessions", kw.pop("session_id", "THI-1-build-1"), **kw
+        fake.path, cwd, tmp_path / "sessions", kw.pop("session_id", "pi-relay-1-build-1"), **kw
     )
 
 
 def test_command_line_per_design_d6(tmp_path):
-    cmd = build_command("/p/pi", "/s", "THI-1-design-1", "m", "high", ["read", "grep"])
+    cmd = build_command("/p/pi", "/s", "pi-relay-1-design-1", "m", "high", ["read", "grep"])
     assert cmd == [
         "/p/pi", "--mode", "rpc", "--no-approve", "--session-dir", "/s",
-        "--session-id", "THI-1-design-1", "--model", "m", "--thinking", "high",
+        "--session-id", "pi-relay-1-design-1", "--model", "m", "--thinking", "high",
         "--tools", "read,grep",
     ]  # fmt: skip
 
@@ -44,11 +44,11 @@ def test_success_turn_text_usage_and_session_file(fake_pi, tmp_path):
     assert res.usage == {
         "fake-model": {"input": 100, "output": 7, "cache_read": 0, "cache_write": 0, "total": 107}
     }
-    assert res.session_file and res.session_file.endswith("THI-1-build-1.jsonl")
+    assert res.session_file and res.session_file.endswith("pi-relay-1-build-1.jsonl")
     assert (tmp_path / "sessions").is_dir()
     assert fake.prompts() == ["do it"]
     argv = fake.starts()[0]["argv"]
-    assert argv[argv.index("--session-id") + 1] == "THI-1-build-1"
+    assert argv[argv.index("--session-id") + 1] == "pi-relay-1-build-1"
     assert fake.starts()[0]["cwd"] == str(tmp_path / "wt")
 
 
@@ -159,8 +159,8 @@ def test_no_factory_secret_reaches_child(fake_pi, tmp_path):
     fake = fake_pi([{}])
     source = {
         "HOME": "/home/x", "PATH": "/usr/bin", "LANG": "C", "LC_ALL": "C", "XDG_DATA_HOME": "/d",
-        "PI_FACTORY_GITHUB_TOKEN": "ghp_secret", "PI_FACTORY_LINEAR_CLIENT_SECRET": "shh",
-        "LINEAR_API_KEY": "nope", "FOO": "bar", "KEEP": "me",
+        "PI_FACTORY_GITHUB_TOKEN": "ghp_secret", "PI_FACTORY_OTHER_SECRET": "shh",
+        "SOME_API_KEY": "nope", "FOO": "bar", "KEEP": "me",
     }  # fmt: skip
     s = session(
         fake, tmp_path, env_source=source, env_passthrough=["KEEP", "PI_FACTORY_GITHUB_TOKEN"]
@@ -172,7 +172,7 @@ def test_no_factory_secret_reaches_child(fake_pi, tmp_path):
     assert not [k for k in env if k.startswith("PI_FACTORY_")]
     assert "ghp_secret" not in json.dumps(env) and "shh" not in json.dumps(env)
     assert env["CI"] == "1" and env["TERM"] == "dumb" and env["KEEP"] == "me"
-    assert "FOO" not in env and "LINEAR_API_KEY" not in env
+    assert "FOO" not in env and "SOME_API_KEY" not in env
     assert env["LC_ALL"] == "C" and env["HOME"] == "/home/x"
     assert env["PATH"].startswith("/usr/bin:") and "pi-node/current/bin" in env["PATH"]
 
@@ -214,7 +214,7 @@ def test_corrupt_session_file_reports_pi_error_text(fake_pi, tmp_path):
     fake = fake_pi()
     sdir = tmp_path / "sessions"
     sdir.mkdir()
-    (sdir / "20260101_THI-1-build-1.jsonl").write_text("CORRUPT")
+    (sdir / "20260101_pi-relay-1-build-1.jsonl").write_text("CORRUPT")
     s = session(fake, tmp_path)
     s.start()
     res = s.prompt_and_wait("x", 10)

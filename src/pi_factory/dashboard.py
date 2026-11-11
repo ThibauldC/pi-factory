@@ -116,8 +116,8 @@ class Dashboard:
     # -- data ------------------------------------------------------------------------------
     def recent_runs(self) -> list[RunRecord]:
         records: list[RunRecord] = []
-        for ident in self.runs.list_issues():
-            rec = self.runs.load(ident)
+        for key in self.runs.list_issues():
+            rec = self.runs.load(key)
             if rec and rec.outcome:
                 records.append(rec)
         records.extend(self.runs.recent_archived(RECENT_RUNS))
@@ -133,9 +133,7 @@ class Dashboard:
         for key in sorted(self.config.repos):
             t = by_repo.get(key)
             if t:
-                issue = (
-                    f'<a href="/issue/{esc(t["issue"])}">{esc(t["issue"])}</a> {esc(t["title"])}'
-                )
+                issue = f'<a href="/issue/{esc(t["key"])}">{esc(t["issue"])}</a> {esc(t["title"])}'
                 rows.append(
                     f"<tr><td><code>{esc(key)}</code></td><td>{issue}</td><td>{esc(t['phase'])}</td>"
                     f"<td>{esc(t['step'] or '-')}</td><td>{esc(t['round'])}</td>"
@@ -168,11 +166,12 @@ class Dashboard:
             tin, tout = token_totals(rec)
             pr = link(rec.pr_url, f"PR #{rec.pr_number}") if rec.pr_url else "-"
             cls = "err" if rec.outcome == "blocked" else "ok"
+            closed = f" (issue closed: {esc(rec.close_reason)})" if rec.close_reason else ""
             recent.append(
-                f"<tr><td>{link(rec.issue_url, rec.issue)} {esc(rec.title)}</td>"
+                f"<tr><td>{link(rec.issue_url, rec.ref)} {esc(rec.title)}</td>"
                 f"<td><code>{esc(rec.repo)}</code></td><td>{esc(rec.phase)} r{esc(rec.round)}</td>"
                 f"<td class='{cls}'>{esc(rec.outcome)}"
-                f"{' – ' + esc(rec.outcome_detail[:120]) if rec.outcome_detail else ''}</td>"
+                f"{' – ' + esc(rec.outcome_detail[:120]) if rec.outcome_detail else ''}{closed}</td>"
                 f"<td>{pr}</td><td>{tin:,} in / {tout:,} out</td><td>{esc(rec.updated_at)}</td></tr>"
             )
         recent_html = (
@@ -182,6 +181,19 @@ class Dashboard:
             else "<p class='muted'>no runs yet</p>"
         )
 
+        if snap.get("conflicts"):
+            rows_c = "".join(
+                f"<tr><td>{link(c['url'], c['issue'])} {esc(c['title'])}</td>"
+                f"<td>{', '.join(f'<code>{esc(lb)}</code>' for lb in c['labels'])}</td></tr>"
+                for c in snap["conflicts"]
+            )
+            conflicts_html = (
+                "<p class='muted'>These issues carry more than one factory:* state label and "
+                "are ignored until a human fixes them.</p>"
+                f"<table><tr><th>Issue</th><th>State labels</th></tr>{rows_c}</table>"
+            )
+        else:
+            conflicts_html = "<p class='muted'>none</p>"
         if snap["poll_errors"]:
             errs = "".join(
                 f"<li class='err'>{fmt_time(ts)} – {esc(text)}</li>"
@@ -196,16 +208,19 @@ class Dashboard:
             f"<p class='muted'>Last poll: {fmt_time(snap['last_poll_at'])} ({status}); "
             f"consecutive failures: {esc(snap['failures'])}; refreshes every {REFRESH_SECONDS}s</p>"
             f"<h2>Repositories</h2>{repos}<h2>Queue</h2>{queue_html}"
-            f"<h2>Recent runs</h2>{recent_html}<h2>Poll errors</h2>{errors}"
+            f"<h2>Recent runs</h2>{recent_html}"
+            f"<h2>Ignored issues (conflicting labels)</h2>{conflicts_html}"
+            f"<h2>Poll errors</h2>{errors}"
         )
         return page("pi-factory", body)
 
-    def issue_page(self, ident: str) -> bytes | None:
+    def issue_page(self, key: str) -> bytes | None:
         with self.scheduler._lock:
-            task = self.scheduler.tasks.get(ident)
-        rec = self.runs.load(ident)
+            task = self.scheduler.tasks.get(key)
+        rec = self.runs.load(key)
         if task is None and rec is None:
             return None
+        ident = task.ref if task is not None else rec.ref
         parts = [f"<h1>{esc(ident)}</h1><p><a href='/'>&larr; overview</a></p>"]
         if task is not None:
             snap = task.snapshot()

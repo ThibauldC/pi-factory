@@ -1,4 +1,4 @@
-"""The scheduler: poll Linear, reconcile, dispatch, cancel and clean up (design D9)."""
+"""The scheduler: poll GitHub, reconcile, dispatch, cancel and clean up (design D9)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 from . import logs, recovery
 from .config import RepoConfig
-from .phases.common import Deps, Task, post_comment_once
+from .phases.common import Deps, Task, block_issue, post_comment_once
 from .secrets import redact
 from .tracker.base import (
     BLOCKED,
@@ -60,11 +60,13 @@ class Scheduler:
         self.queue_snapshot: list[dict[str, Any]] = []
         self._last_sweep = clock()
         self._last_issues: list[Issue] = []
+        self.conflicts: list[dict[str, Any]] = []
+        self._logged_conflicts: set[tuple[str, tuple[str, ...]]] = set()
 
     # -- startup ---------------------------------------------------------------------------
     def startup_check(self) -> list[str]:
-        """Linear prerequisites: workflow states, repo labels and the owner."""
-        return self.deps.tracker.check_setup(list(self.config.repos))
+        """GitHub prerequisites: the factory:* labels in every repository, and the owner."""
+        return self.deps.tracker.check_setup(list(self.config.repos.values()))
 
     def require_startup(self) -> None:
         problems = self.startup_check()
@@ -74,13 +76,14 @@ class Scheduler:
             raise StartupError("; ".join(problems))
 
     # -- polling ---------------------------------------------------------------------------
-    def _tracked_ids(self) -> list[str]:
-        ids = []
-        for ident in self.deps.runs.list_issues():
-            rec = self.deps.runs.load(ident)
-            if rec and rec.issue_id:
-                ids.append(rec.issue_id)
-        return ids
+    def _tracked(self) -> list[tuple[str, int]]:
+        """``(repo key, issue number)`` of every issue with a run record."""
+        tracked = []
+        for key in self.deps.runs.list_issues():
+            rec = self.deps.runs.load(key)
+            if rec and rec.issue_number:
+                tracked.append((rec.repo, rec.issue_number))
+        return tracked
 
     def next_delay(self) -> float:
         return backoff_delay(self.config.poll_interval_seconds, self.failures)
@@ -90,7 +93,7 @@ class Scheduler:
         started = self._clock()
         self.last_poll_at = self._wall()
         try:
-            issues = self.deps.tracker.list_issues(self._tracked_ids())
+            issues = self.deps.tracker.list_issues(self._tracked())
         except TrackerError as exc:
             self.failures += 1
             self.last_poll_ok = False
@@ -115,55 +118,112 @@ class Scheduler:
     # -- reconcile -------------------------------------------------------------------------
     def reconcile(self, issues: list[Issue], poll_started: float | None = None) -> None:
         poll_started = self._clock() if poll_started is None else poll_started
-        by_ident = {i.identifier: i for i in issues}
-        self._cancel_departed(by_ident)
+        by_key = {i.key: i for i in issues}
+        self._repair_swaps(issues)
+        self._note_conflicts(issues)
+        self._cancel_departed(by_key)
         self._cleanup_finished(issues)
         self._recover_orphans(issues, poll_started)
         ready = self._validate_ready(issues)
         self._dispatch(ready)
 
-    def _cancel_departed(self, by_ident: dict[str, Issue]) -> None:
+    def _repair_swaps(self, issues: list[Issue]) -> None:
+        """An issue with two state labels is normally left alone. The exception is a swap the
+        factory itself started (recorded in its run record) and did not finish: the stale
+        label is removed. A label the factory did not add is never removed."""
+        for issue in issues:
+            with self._lock:
+                if issue.key in self.tasks:
+                    continue  # its worker is finishing the swap itself
+            rec = self.deps.runs.load(issue.key)
+            if rec is None or not rec.swap:
+                continue
+            swap = rec.swap
+            labels = {name.lower() for name in issue.state_labels}
+            try:
+                if issue.conflicting and labels == {swap["from"], swap["to"]}:
+                    self.deps.tracker.remove_state(issue, swap["from"])
+                    logs.event("swap_repaired", issue.ref, removed=swap["from"], kept=swap["to"])
+                elif issue.conflicting or issue.state != swap["to"]:
+                    continue
+                rec.swap = None
+                self.deps.runs.save(rec)
+            except TrackerError as exc:
+                logs.event("swap_repair_failed", issue.ref, error=redact(str(exc)))
+
+    def _note_conflicts(self, issues: list[Issue]) -> None:
+        """Issues with more than one state label are ignored, logged and shown."""
+        current = []
+        for issue in issues:
+            if issue.closed or not issue.conflicting:
+                continue
+            labels = tuple(sorted(name.lower() for name in issue.state_labels))
+            current.append(
+                {
+                    "issue": issue.ref,
+                    "key": issue.key,
+                    "title": issue.title,
+                    "url": issue.url,
+                    "labels": list(labels),
+                }  # fmt: skip
+            )
+            if (issue.key, labels) not in self._logged_conflicts:
+                self._logged_conflicts.add((issue.key, labels))
+                logs.event("conflicting_state_labels", issue.ref, labels=",".join(labels))
+        self.conflicts = current
+
+    def _cancel_departed(self, by_key: dict[str, Issue]) -> None:
         with self._lock:
             tasks = list(self.tasks.values())
         for task in tasks:
             if not task.active or task.finishing or task.cancel_event.is_set():
                 continue
-            issue = by_ident.get(task.identifier)
+            issue = by_key.get(task.key)
             expected = PHASE_STATE[task.phase]
-            if issue is None or issue.state != expected:
-                now = issue.state if issue else "missing"
-                logs.event("cancel_requested", task.identifier, phase=task.phase, state=now)
-                task.cancel()
+            if issue is None:
+                why = "missing"
+            elif issue.closed:
+                why = "closed"
+            elif expected not in {name.lower() for name in issue.state_labels}:
+                why = "label changed"
+            else:
+                continue
+            logs.event("cancel_requested", task.ref, phase=task.phase, why=why)
+            task.cancel()
 
     def _cleanup_finished(self, issues: list[Issue]) -> None:
+        """Closed issues (completed or not planned): remove the worktree and local branch and
+        archive the run, noting the close reason."""
         for issue in issues:
-            if not issue.is_finished:
+            if not issue.closed:
                 continue
             with self._lock:
-                if issue.identifier in self.tasks:
+                if issue.key in self.tasks:
                     continue  # still being stopped; clean up on a later tick
-            rec = self.deps.runs.load(issue.identifier)
+            rec = self.deps.runs.load(issue.key)
             if rec is None:
                 continue
             repo = self.config.repos.get(rec.repo)
             try:
+                rec.close_reason = issue.close_reason or "completed"
+                self.deps.runs.save(rec)
                 if repo is not None:
-                    self.deps.git.remove_worktree(repo, issue.identifier, rec.branch)
-                self.deps.runs.archive(issue.identifier)
-                logs.event("cleaned_up", issue.identifier, state=issue.state)
+                    self.deps.git.remove_worktree(repo, str(rec.issue_number), rec.branch)
+                self.deps.runs.archive(issue.key)
+                logs.event("cleaned_up", issue.ref, close_reason=rec.close_reason)
             except Exception as exc:  # noqa: BLE001
-                logs.event("cleanup_failed", issue.identifier, error=redact(str(exc)))
+                logs.event("cleanup_failed", issue.ref, error=redact(str(exc)))
 
     def _recover_orphans(self, issues: list[Issue], poll_started: float) -> None:
         """Issues in Designing/Building that no worker owns: after a restart, or because a
         worker died. Each is resumed (once per phase) or blocked."""
         for issue in issues:
-            if issue.state not in recovery.STATE_PHASE or self.stop_event.is_set():
+            if issue.closed or issue.state not in recovery.STATE_PHASE or self.stop_event.is_set():
                 continue
             with self._lock:
-                if issue.identifier in self.tasks:
+                if issue.key in self.tasks:
                     continue
-                if self._finished_at.get(issue.identifier, -1.0) >= poll_started:
+                if self._finished_at.get(issue.key, -1.0) >= poll_started:
                     continue  # the poll predates that worker's final transition
             verdict = recovery.assess(self.deps, issue)
             if verdict.kind == "block":
@@ -179,76 +239,46 @@ class Scheduler:
                 rec.recoveries.get(recovery.recovery_key(rec), 0) + 1
             )
             self.deps.runs.save(rec)
-            logs.event(
-                "recovering", issue.identifier, phase=rec.phase, round=rec.round, step=rec.step
-            )
+            logs.event("recovering", issue.ref, phase=rec.phase, round=rec.round, step=rec.step)
             self.start_task(issue, self.config.repos[rec.repo], rec.phase, resume=True)
 
     def _block_orphan(self, issue: Issue, verdict: recovery.Assessment) -> None:
-        body = (
-            f"**Blocked:** {verdict.reason}.\n\n"
-            "To retry, move this issue back to Ready for Design or Ready for Build."
-        )
         try:
             if verdict.rec is not None:
-                from .phases.common import block_issue
-
                 block_issue(self.deps, issue, verdict.rec, verdict.reason)
             else:
+                body = (
+                    f"**Blocked:** {verdict.reason}.\n\n"
+                    f"To retry, replace the `{BLOCKED}` label with `{READY_FOR_DESIGN}` "
+                    f"or `{READY_FOR_BUILD}`."
+                )
                 self._block_untracked(issue, "no-run", body)
         except Exception as exc:  # noqa: BLE001
-            logs.event("block_failed", issue.identifier, error=redact(str(exc)))
+            logs.event("block_failed", issue.ref, error=redact(str(exc)))
 
     def _block_untracked(self, issue: Issue, key: str, body: str) -> None:
-        post_comment_once(self.deps.tracker, issue, issue.identifier, key, body)
-        self.deps.tracker.set_state(issue.id, BLOCKED)
-        self.deps.tracker.assign_owner(issue.id)
-        logs.event("blocked", issue.identifier, reason=key)
+        post_comment_once(self.deps.tracker, issue, key, body)
+        self.deps.tracker.set_state(issue, BLOCKED)
+        self.deps.tracker.assign_owner(issue)
+        logs.event("blocked", issue.ref, reason=key)
 
     def _validate_ready(self, issues: list[Issue]) -> list[Issue]:
-        """Keep issues with exactly one configured repo label; block the rest."""
+        """Open issues with exactly one state label, which is a ready one."""
         ready_now: set[str] = set()
         valid: list[Issue] = []
-        keys = sorted(self.config.repos)
         for issue in issues:
-            if issue.state not in READY_PHASE:
+            if issue.closed or issue.state not in READY_PHASE:
                 continue
             with self._lock:
-                if issue.identifier in self.tasks:
+                if issue.key in self.tasks:
                     continue
-            labels = issue.repo_labels()
-            if len(labels) != 1 or labels[0] not in self.config.repos:
-                self._block_bad_label(issue, labels, keys)
-                continue
-            ready_now.add(issue.identifier)
-            self._ready_since.setdefault(issue.identifier, self._clock())
+            ready_now.add(issue.key)
+            self._ready_since.setdefault(issue.key, self._clock())
             valid.append(issue)
-        for ident in list(self._ready_since):
-            if ident not in ready_now:
-                del self._ready_since[ident]
+        for key in list(self._ready_since):
+            if key not in ready_now:
+                del self._ready_since[key]
         return valid
-
-    def _block_bad_label(self, issue: Issue, labels: list[str], keys: list[str]) -> None:
-        if not labels:
-            why = "has no `repo` label"
-        elif len(labels) > 1:
-            why = f"has more than one `repo` label ({', '.join(labels)})"
-        else:
-            why = f"has the `repo` label `{labels[0]}`, which is not a configured repository"
-        body = (
-            f"**Blocked:** this issue {why}. Give it exactly one label from the `repo` group; "
-            f"the configured repositories are: {', '.join(f'`{k}`' for k in keys)}.\n\n"
-            "Then move it back to Ready for Design or Ready for Build."
-        )
-        try:
-            post_comment_once(
-                self.deps.tracker, issue, issue.identifier, f"label-{issue.state}", body
-            )
-            self.deps.tracker.set_state(issue.id, BLOCKED)
-            self.deps.tracker.assign_owner(issue.id)
-            logs.event("blocked", issue.identifier, reason="repo label", labels=",".join(labels))
-        except TrackerError as exc:
-            logs.event("block_failed", issue.identifier, error=redact(str(exc)))
 
     # -- dispatch --------------------------------------------------------------------------
     def _ordered_candidates(self, ready: list[Issue]) -> list[Issue]:
@@ -256,20 +286,21 @@ class Scheduler:
         their oldest waiting issue became ready."""
         by_repo: dict[str, list[Issue]] = {}
         for issue in ready:
-            by_repo.setdefault(issue.repo_labels()[0], []).append(issue)
+            by_repo.setdefault(issue.repo, []).append(issue)
         ordering = []
         for repo, items in by_repo.items():
-            items.sort(key=lambda i: (i.priority_rank, i.created_at))
-            oldest_ready = min(self._ready_since.get(i.identifier, 0.0) for i in items)
+            items.sort(key=lambda i: (i.priority_rank, i.created_at, i.number))
+            oldest_ready = min(self._ready_since.get(i.key, 0.0) for i in items)
             ordering.append((oldest_ready, repo, items))
         ordering.sort(key=lambda t: (t[0], t[1]))
         self.queue_snapshot = [
             {
-                "issue": i.identifier,
+                "issue": i.ref,
+                "key": i.key,
                 "title": i.title,
                 "repo": repo,
                 "phase": READY_PHASE[i.state],
-                "priority": i.priority,
+                "priority": i.priority_label,
                 "url": i.url,
             }
             for _, repo, items in ordering
@@ -282,13 +313,13 @@ class Scheduler:
         for issue in candidates:
             if self.stop_event.is_set():
                 return
-            repo_key = issue.repo_labels()[0]
+            repo_key = issue.repo
             with self._lock:
                 if len(self.tasks) >= self.config.max_concurrent:
                     return
                 if any(t.repo.key == repo_key for t in self.tasks.values()):
                     continue
-                if issue.identifier in self.tasks:
+                if issue.key in self.tasks:
                     continue
             self.start_task(issue, self.config.repos[repo_key], READY_PHASE[issue.state])
 
@@ -297,16 +328,16 @@ class Scheduler:
     ) -> Task:
         task = Task(issue, repo, phase)
         with self._lock:
-            self.tasks[issue.identifier] = task
+            self.tasks[issue.key] = task
             thread = threading.Thread(
                 target=self._run_worker,
                 args=(task, resume),
-                name=f"worker-{issue.identifier}",
+                name=f"worker-{issue.key}",
                 daemon=True,
             )
-            self._threads[issue.identifier] = thread
-        self._ready_since.pop(issue.identifier, None)
-        logs.event("task_start", issue.identifier, repo=repo.key, phase=phase, resume=resume)
+            self._threads[issue.key] = thread
+        self._ready_since.pop(issue.key, None)
+        logs.event("task_start", issue.ref, repo=repo.key, phase=phase, resume=resume)
         thread.start()
         return task
 
@@ -316,10 +347,10 @@ class Scheduler:
             outcome = run_task(self.deps, task, resume=resume)
         finally:
             with self._lock:
-                self.tasks.pop(task.identifier, None)
-                self._threads.pop(task.identifier, None)
-                self._finished_at[task.identifier] = self._clock()
-            logs.event("task_end", task.identifier, phase=task.phase, outcome=outcome)
+                self.tasks.pop(task.key, None)
+                self._threads.pop(task.key, None)
+                self._finished_at[task.key] = self._clock()
+            logs.event("task_end", task.ref, phase=task.phase, outcome=outcome)
             if not self.stop_event.is_set():
                 self.wake.set()
 
@@ -369,6 +400,7 @@ class Scheduler:
         return {
             "tasks": tasks,
             "queue": list(self.queue_snapshot),
+            "conflicts": list(self.conflicts),
             "last_poll_at": self.last_poll_at,
             "last_poll_ok": self.last_poll_ok,
             "poll_errors": list(self.poll_errors),

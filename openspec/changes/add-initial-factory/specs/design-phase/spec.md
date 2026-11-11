@@ -15,33 +15,37 @@ The design phase SHALL run pi in the issue's worktree with the built-in tools li
 
 #### Scenario: Worktree modified during design
 - **WHEN** the worktree has uncommitted changes after the design session
-- **THEN** the factory discards them, moves the issue to Blocked, and comments that the design round modified files
+- **THEN** the factory discards them, moves the issue to `factory:blocked`, and comments that the design round modified files
 
 ### Requirement: Design prompt inputs
-The design prompt SHALL include the issue identifier, title, description and all human comments. For a redesign round, it SHALL also include the previous design and mark which comments were posted after it.
+The design prompt SHALL include the issue reference (for example `pi-relay#123`), title, description and all trusted human comments. For a redesign round, it SHALL also include the previous design and mark which comments were posted after it.
 
 #### Scenario: First design
 - **WHEN** an issue with no previous design enters the design phase
-- **THEN** the prompt contains the issue's title, description and existing human comments
+- **THEN** the prompt contains the issue's title, description and existing trusted human comments
+
+#### Scenario: Untrusted comment omitted
+- **WHEN** the issue has a comment from an author who is not owner, member or collaborator
+- **THEN** that comment is not in the prompt
 
 #### Scenario: Redesign
 - **WHEN** an issue with a previous design comment re-enters the design phase
 - **THEN** the prompt contains the previous design and the human comments posted after it, marked as feedback to address
 
 ### Requirement: Design comment format
-The design SHALL be posted as one Linear comment, starting with a heading that names the round (for example `Design (round 2)`). It SHALL contain these sections: Approach, Files likely touched, Acceptance checks, and Open questions. Each open question SHALL be numbered and give a recommended answer.
+The design SHALL be posted as one GitHub issue comment, starting with a heading that names the round (for example `Design (round 2)`). It SHALL contain these sections: Approach, Files likely touched, Acceptance checks, and Open questions. Each open question SHALL be numbered and give a recommended answer.
 
 #### Scenario: Well-formed design
 - **WHEN** the design session returns text containing all required sections
-- **THEN** the factory posts it as a comment and moves the issue to Design Review
+- **THEN** the factory posts it as a comment and moves the issue to `factory:design-review`
 
 #### Scenario: Malformed design
 - **WHEN** the session's final text is missing a required section
-- **THEN** the factory asks the same session once to correct the format. If it is still malformed, it moves the issue to Blocked with the raw output attached as a comment
+- **THEN** the factory asks the same session once to correct the format. If it is still malformed, it moves the issue to `factory:blocked` with the raw output attached as a comment
 
 ### Requirement: Design is the build contract
-The factory SHALL record the comment ID of the most recent posted design for each issue. The build phase SHALL use that design, plus the human comments posted after it, as its specification.
+The factory SHALL record the comment ID of the most recent posted design for each issue. The build phase SHALL use that design, plus the trusted human comments posted after it, as its specification.
 
 #### Scenario: Owner answers open questions
-- **WHEN** the owner replies to the design's open questions in a comment and then moves the issue to Ready for Build
+- **WHEN** the owner replies to the design's open questions in a comment and then moves the issue to `factory:ready-for-build`
 - **THEN** the build prompt includes both the design and that reply

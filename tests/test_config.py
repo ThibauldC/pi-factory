@@ -3,30 +3,25 @@ import pytest
 from pi_factory.config import ConfigError, load_config, parse_config
 
 MINIMAL = {
-    "linear": {"team": "THI", "owner": "me@example.com"},
-    "repos": {
-        "pi-relay": {
-            "url": "https://github.com/o/pi-relay.git",
-            "checks": ["pnpm test"],
-        }
-    },
+    "github": {"owner": "olivia"},
+    "repos": {"pi-relay": {"repo": "acme/pi-relay", "checks": ["pnpm test"]}},
 }
 
 
 def repo_with(**kw):
     repo = dict(MINIMAL["repos"]["pi-relay"])
     repo.update(kw)
-    return {"linear": MINIMAL["linear"], "repos": {"pi-relay": repo}}
+    return {"github": MINIMAL["github"], "repos": {"pi-relay": repo}}
 
 
 def test_default_path(tmp_path, monkeypatch):
     cfg_dir = tmp_path / ".config" / "pi-factory"
     cfg_dir.mkdir(parents=True)
     (cfg_dir / "factory.toml").write_text(
-        '[linear]\nteam="T"\nowner="o"\n[repos.r]\nurl="u"\nchecks=["x"]\n'
+        '[github]\nowner="o"\n[repos.r]\nrepo="a/r"\nchecks=["x"]\n'
     )
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert load_config().linear.team == "T"
+    assert load_config().github.owner == "o"
 
 
 def test_minimal_config_defaults():
@@ -39,7 +34,8 @@ def test_minimal_config_defaults():
     assert cfg.retention_days == 30
     assert cfg.dashboard.host == "127.0.0.1" and cfg.dashboard.port == 8787
     assert cfg.pi_path.name == "pi" and ".pi/agent/bin" in str(cfg.pi_path)
-    assert cfg.linear.auth == "oauth"
+    assert cfg.github.owner == "olivia" and cfg.github.api_url == "https://api.github.com"
+    assert cfg.github.bot_name and cfg.github.bot_email
     assert cfg.design.tools == ("read", "grep", "find", "ls")
     assert cfg.repos["pi-relay"].base_branch == "main"
     assert cfg.repos["pi-relay"].setup is None
@@ -56,6 +52,51 @@ def test_repository_entry():
     repo = cfg.repos["pi-relay"]
     assert repo.checks == ("pnpm typecheck", "pnpm lint", "pnpm test", "pnpm build")
     assert repo.setup == "pnpm install --frozen-lockfile"
+    assert repo.repo == "acme/pi-relay" and repo.base_branch == "main"
+    assert (repo.owner, repo.name) == ("acme", "pi-relay")
+
+
+def test_clone_url_is_derived_from_repo_unless_given():
+    assert parse_config(repo_with()).repos["pi-relay"].url == "https://github.com/acme/pi-relay.git"
+    cfg = parse_config(repo_with(url="git@example.com:acme/pi-relay.git"))
+    assert cfg.repos["pi-relay"].url == "git@example.com:acme/pi-relay.git"
+
+
+@pytest.mark.parametrize("value", ["pi-relay", "a/b/c", "/x", "x/", "a b/c", "a/b c"])
+def test_malformed_repo_names_the_key_and_the_expected_form(value):
+    with pytest.raises(ConfigError) as exc:
+        parse_config(repo_with(repo=value))
+    assert "repos.pi-relay.repo" in str(exc.value) and "owner/name" in str(exc.value)
+
+
+def test_duplicate_github_repository_is_rejected():
+    data = repo_with()
+    data["repos"]["again"] = {"repo": "ACME/pi-relay", "checks": ["x"]}
+    with pytest.raises(ConfigError, match=r"repos\.again\.repo duplicates repos\.pi-relay\.repo"):
+        parse_config(data)
+
+
+def test_repository_key_must_be_path_safe():
+    data = repo_with()
+    data["repos"]["bad key/x"] = data["repos"].pop("pi-relay")
+    with pytest.raises(ConfigError, match="repository key"):
+        parse_config(data)
+
+
+def test_github_section_is_required_and_validated():
+    with pytest.raises(ConfigError, match=r"missing required table github"):
+        parse_config({"repos": MINIMAL["repos"]})
+    with pytest.raises(ConfigError, match=r"missing required key github\.owner"):
+        parse_config({"github": {}, "repos": MINIMAL["repos"]})
+    with pytest.raises(ConfigError, match=r"github\.api_url"):
+        parse_config({"github": {"owner": "o", "api_url": "ftp://x"}, "repos": MINIMAL["repos"]})
+    cfg = parse_config(
+        {
+            "github": {"owner": "o", "api_url": "https://ghe.example/api/v3/"},
+            "repos": MINIMAL["repos"],
+        }
+    )
+    assert cfg.github.api_url == "https://ghe.example/api/v3"
 
 
 def test_typo_in_key_names_full_path():
@@ -81,16 +122,18 @@ def test_empty_checks_rejected():
 
 def test_no_repos_rejected():
     with pytest.raises(ConfigError, match="at least one repository"):
-        parse_config({"linear": MINIMAL["linear"], "repos": {}})
+        parse_config({"github": MINIMAL["github"], "repos": {}})
     with pytest.raises(ConfigError, match="at least one repository"):
-        parse_config({"linear": MINIMAL["linear"]})
+        parse_config({"github": MINIMAL["github"]})
 
 
 def test_missing_required_and_wrong_types():
-    with pytest.raises(ConfigError, match=r"linear\.owner"):
-        parse_config({"linear": {"team": "T"}, "repos": MINIMAL["repos"]})
-    with pytest.raises(ConfigError, match=r"repos\.pi-relay\.url"):
-        parse_config(repo_with(url=3))
+    with pytest.raises(ConfigError, match=r"github\.owner"):
+        parse_config({"github": {"bot_name": "x"}, "repos": MINIMAL["repos"]})
+    with pytest.raises(ConfigError, match=r"repos\.pi-relay\.repo"):
+        parse_config(repo_with(repo=3))
+    with pytest.raises(ConfigError, match=r"missing required key repos\.pi-relay\.repo"):
+        parse_config({"github": MINIMAL["github"], "repos": {"pi-relay": {"checks": ["x"]}}})
     data = dict(MINIMAL)
     data["factory"] = {"max_concurrent": "two"}
     with pytest.raises(ConfigError, match=r"factory\.max_concurrent"):
@@ -112,7 +155,7 @@ def test_unknown_top_level_and_section_keys():
 def test_model_resolution_order():
     data = repo_with(design={"model": "B"})
     data["design"] = {"model": "A", "thinking": "high"}
-    data["repos"]["other"] = {"url": "u", "checks": ["c"]}
+    data["repos"]["other"] = {"repo": "acme/other", "checks": ["c"]}
     cfg = parse_config(data)
     assert cfg.phase_settings("pi-relay", "design").model == "B"
     assert cfg.phase_settings("pi-relay", "design").thinking == "high"
@@ -130,15 +173,8 @@ def test_dashboard_must_be_loopback():
 
 def test_invalid_toml_and_missing_file(tmp_path):
     bad = tmp_path / "bad.toml"
-    bad.write_text("[linear\n")
+    bad.write_text("[github\n")
     with pytest.raises(ConfigError, match="invalid TOML"):
         load_config(bad)
     with pytest.raises(ConfigError, match="cannot read config file"):
         load_config(tmp_path / "nope.toml")
-
-
-def test_api_key_auth_and_validation():
-    cfg = parse_config({**MINIMAL, "linear": {**MINIMAL["linear"], "auth": "api_key"}})
-    assert cfg.linear.auth == "api_key"
-    with pytest.raises(ConfigError, match=r"linear\.auth"):
-        parse_config({**MINIMAL, "linear": {**MINIMAL["linear"], "auth": "pw"}})

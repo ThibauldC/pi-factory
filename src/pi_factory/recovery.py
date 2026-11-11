@@ -25,18 +25,19 @@ def recovery_key(rec: RunRecord) -> str:
 
 
 def assess(deps: Deps, issue: Issue) -> Assessment:
-    rec = deps.runs.load(issue.identifier)
+    rec = deps.runs.load(issue.key)
     if rec is None:
         return Assessment(
             "block",
-            f"{issue.state} but no local run was found on this host "
+            f"the issue is labelled `{issue.state}` but no local run was found on this host "
             "(no run record exists, so there is nothing to resume)",
         )
     phase = STATE_PHASE[issue.state]
     if rec.phase != phase or rec.outcome:
         return Assessment(
             "block",
-            f"the issue is in {issue.state}, but the last local run was a {rec.phase} run that "
+            f"the issue is labelled `{issue.state}`, but the last local run was a {rec.phase} "
+            "run that "
             f"{'ended as ' + rec.outcome if rec.outcome else 'does not match'}; "
             "nothing is interrupted, so there is nothing to resume",
             rec,

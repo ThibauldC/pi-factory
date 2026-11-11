@@ -17,15 +17,15 @@ The factory SHALL launch pi from a configured binary path (default `~/.pi/agent/
 The factory SHALL run each design or build phase as one pi child process, with the issue's worktree as working directory. That process SHALL exit when the phase ends, so no pi process stays running between phases.
 
 #### Scenario: Idle factory
-- **WHEN** no issue is in Designing or Building
+- **WHEN** no issue is labelled `factory:designing` or `factory:building`
 - **THEN** no pi child process of the factory is running
 
 ### Requirement: Persistent session file per phase
-Each phase SHALL store its pi session inside the issue's run directory, under a session identifier derived from the issue, phase and round. The factory SHALL record that identifier and directory before the first prompt is sent, so that the same session can be reopened later.
+Each phase SHALL store its pi session inside the issue's run directory, under a session identifier derived from the issue key (repository key and issue number), phase and round. The factory SHALL record that identifier and directory before the first prompt is sent, so that the same session can be reopened later.
 
 #### Scenario: Session file location
-- **WHEN** build round 2 of issue THI-123 starts
-- **THEN** the pi session file is created under `runs/THI-123/`, with an identifier such as `THI-123-build-2`, and the run record contains both
+- **WHEN** build round 2 of issue `pi-relay#123` starts
+- **THEN** the pi session file is created under `runs/pi-relay-123/`, with an identifier such as `pi-relay-123-build-2`, and the run record contains both
 
 ### Requirement: Extensions and trust
 pi SHALL run with the user's installed extensions and skills enabled. Project-local pi resources in the target repository SHALL NOT be trusted for factory runs. Context files such as AGENTS.md SHALL still load.
@@ -53,25 +53,25 @@ The model and thinking level SHALL be configurable per phase (design, build), re
 - **THEN** pi is launched without a model flag and uses its own default
 
 ### Requirement: Wall-clock timeouts
-Each pi turn SHALL have a configurable time limit: design 15 minutes, build and repair turns 45 minutes. When the limit is reached, the factory SHALL abort the turn, terminate the process and move the issue to Blocked, stating which limit was hit.
+Each pi turn SHALL have a configurable time limit: design 15 minutes, build and repair turns 45 minutes. When the limit is reached, the factory SHALL abort the turn, terminate the process and move the issue to `factory:blocked`, stating which limit was hit.
 
 #### Scenario: Design runs too long
 - **WHEN** a design turn has run for 15 minutes without finishing
-- **THEN** the factory aborts it, the pi process exits, and the issue is Blocked with a comment naming the design timeout
+- **THEN** the factory aborts it, the pi process exits, and the issue is labelled `factory:blocked` with a comment naming the design timeout
 
 ### Requirement: Failure detection from events
 The factory SHALL decide whether a turn succeeded from pi's structured events, not only from its exit code. A turn that ends with an error, abort or length stop, or a process that exits before the turn finishes, SHALL count as failed.
 
 #### Scenario: Provider error
 - **WHEN** pi reports the final assistant message with an error stop reason
-- **THEN** the phase fails, and the error text appears in the Blocked comment and the run record
+- **THEN** the phase fails, and the error text appears in the `factory:blocked` comment and the run record
 
 ### Requirement: Scrubbed environment
-The factory SHALL launch pi and check commands with an allowlisted environment that excludes the factory's Linear and GitHub credentials. It SHALL NOT put credentials in their arguments, prompts or worktree files.
+The factory SHALL launch pi and check commands with an allowlisted environment that excludes the factory's GitHub credentials. It SHALL NOT put credentials in their arguments, prompts or worktree files.
 
 #### Scenario: Credentials hidden from agent
 - **WHEN** a pi session runs `env`
-- **THEN** the output contains neither the Linear credential variables nor the GitHub token variable
+- **THEN** the output does not contain the GitHub token variable
 
 ### Requirement: Token usage accounting
 The factory SHALL sum the input, output and cache token counts reported by pi for each phase and round, and store them in the run record.

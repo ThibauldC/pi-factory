@@ -2,31 +2,23 @@
 
 from __future__ import annotations
 
-import json
-import re
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from ..config import RepoConfig
+from ..config import DEFAULT_API_URL, RepoConfig
+from ..githubapi import GitHubAPIError, GitHubClient
 from ..secrets import Secrets
 from .base import CodeHostError, PullRequest
 
-API_URL = "https://api.github.com"
-_URL_RE = re.compile(
-    r"^(?:https?://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)"
-    r"(?P<owner>[^/]+)/(?P<name>[^/]+?)(?:\.git)?/?$"
-)
 
-
-def parse_github_url(url: str) -> tuple[str, str]:
-    m = _URL_RE.match(url.strip())
-    if not m:
-        raise CodeHostError(f"not a GitHub repository URL: {url}")
-    return m["owner"], m["name"]
+def _code_host_error(exc: GitHubAPIError) -> CodeHostError:
+    if exc.retryable:
+        return CodeHostError(str(exc), "transient")
+    if exc.kind in ("access", "not_found"):
+        return CodeHostError(str(exc), "access")
+    return CodeHostError(str(exc))
 
 
 class GitHub:
@@ -34,68 +26,33 @@ class GitHub:
         self,
         secrets: Secrets,
         *,
-        api_url: str = API_URL,
+        api_url: str = DEFAULT_API_URL,
         timeout: float = 30.0,
         mergeable_retry_delay: float = 2.0,
         sleep: Callable[[float], None] = time.sleep,
-        repo_slug: Callable[[RepoConfig], tuple[str, str]] = lambda r: parse_github_url(r.url),
     ):
-        self.secrets = secrets
-        self.api_url = api_url.rstrip("/")
-        self.timeout = timeout
+        self.client = GitHubClient(secrets, api_url, timeout)
         self.mergeable_retry_delay = mergeable_retry_delay
         self._sleep = sleep
-        self._slug = repo_slug
 
     # -- transport -------------------------------------------------------------------------
     def _request(
         self, method: str, path: str, body: dict[str, Any] | None = None
     ) -> tuple[int, Any]:
-        req = urllib.request.Request(
-            self.api_url + path,
-            data=json.dumps(body).encode() if body is not None else None,
-            method=method,
-            headers={
-                "Authorization": f"Bearer {self.secrets.github_token()}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "pi-factory",
-                "Content-Type": "application/json",
-            },
-        )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return resp.status, json.loads(resp.read().decode("utf-8") or "null")
-        except urllib.error.HTTPError as exc:
-            text = exc.read().decode("utf-8", "replace")
-            try:
-                payload: Any = json.loads(text)
-            except ValueError:
-                payload = {"message": text[:300]}
-            if exc.code >= 500 or exc.code == 429:
-                raise CodeHostError(
-                    f"GitHub HTTP {exc.code} on {method} {path}", "transient"
-                ) from exc
-            if exc.code in (401, 403, 404):
-                raise CodeHostError(
-                    f"GitHub HTTP {exc.code} on {method} {path}: "
-                    f"{str(payload.get('message'))[:200]}",
-                    "access",
-                ) from exc
-            return exc.code, payload
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            raise CodeHostError(f"GitHub request failed: {exc}", "transient") from exc
+            return self.client.request(method, path, body)
+        except GitHubAPIError as exc:
+            raise _code_host_error(exc) from exc
 
     def _ok(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-        status, payload = self._request(method, path, body)
-        if status >= 300:
-            message = (payload or {}).get("message") if isinstance(payload, dict) else payload
-            raise CodeHostError(f"GitHub HTTP {status} on {method} {path}: {str(message)[:300]}")
-        return payload
+        try:
+            return self.client.ok(method, path, body)
+        except GitHubAPIError as exc:
+            raise _code_host_error(exc) from exc
 
-    def _repo_path(self, repo: RepoConfig) -> str:
-        owner, name = self._slug(repo)
-        return f"/repos/{owner}/{name}"
+    @staticmethod
+    def _repo_path(repo: RepoConfig) -> str:
+        return f"/repos/{repo.owner}/{repo.name}"
 
     @staticmethod
     def _pr(node: dict[str, Any]) -> PullRequest:
@@ -108,21 +65,28 @@ class GitHub:
         )
 
     # -- CodeHost protocol -----------------------------------------------------------------
+    def _repo_info(self, repo: RepoConfig) -> dict[str, Any]:
+        return self._ok("GET", self._repo_path(repo)) or {}
+
     def check_access(self, repo: RepoConfig) -> str | None:
         try:
-            info = self._ok("GET", self._repo_path(repo))
+            info = self._repo_info(repo)
         except CodeHostError as exc:
             if exc.kind == "access":
-                return f"the GitHub bot account lacks access to {repo.url}: {exc}"
+                return f"the GitHub bot account lacks access to {repo.repo}: {exc}"
             raise
-        perms = (info or {}).get("permissions") or {}
+        perms = info.get("permissions") or {}
         if not (perms.get("push") or perms.get("admin") or perms.get("maintain")):
-            return f"the GitHub bot account lacks push access to {repo.url}"
+            return f"the GitHub bot account lacks push access to {repo.repo}"
+        if info.get("has_issues") is False:
+            return f"issues are disabled in {repo.repo}"
         return None
 
+    def default_branch(self, repo: RepoConfig) -> str:
+        return str(self._repo_info(repo).get("default_branch") or "")
+
     def find_open_pr(self, repo: RepoConfig, branch: str) -> PullRequest | None:
-        owner, _ = self._slug(repo)
-        query = urllib.parse.urlencode({"head": f"{owner}:{branch}", "state": "open"})
+        query = urllib.parse.urlencode({"head": f"{repo.owner}:{branch}", "state": "open"})
         nodes = self._ok("GET", f"{self._repo_path(repo)}/pulls?{query}") or []
         return self._pr(nodes[0]) if nodes else None
 

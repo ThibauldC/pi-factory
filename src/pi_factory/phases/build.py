@@ -26,6 +26,7 @@ from .common import (
     session_exists,
     set_step,
     strip_marker,
+    swap_state,
 )
 from .design import _section_bodies
 
@@ -73,7 +74,7 @@ def build_prompt(deps: Deps, task: Task, rec: RunRecord, continuation: bool) -> 
         repo=task.repo.key,
         branch=task.issue.branch_name,
         base_branch=task.repo.base_branch,
-        identifier=task.issue.identifier,
+        identifier=task.issue.ref,
         title=task.issue.title,
         description=task.issue.description or "(no description)",
         design=design or "(no design was recorded; implement the issue description above)",
@@ -114,7 +115,7 @@ def pr_body(task: Task, rec: RunRecord) -> str:
         check_rows.append(f"| `{c['command']}` | {mark} | {c['duration']:.0f}s |")
     return "\n".join(
         [
-            f"Linear issue: [{task.issue.identifier}]({task.issue.url or task.issue.identifier})",
+            f"Closes #{task.issue.number}",
             "",
             "## Design",
             design_summary(design) if design else "_No design was recorded for this issue._",
@@ -165,7 +166,7 @@ def run_checks(deps: Deps, task: Task, rec: RunRecord, wt: Path):
         deps.runs.save(rec)
         logs.event(
             "check_result",
-            rec.issue,
+            rec.ref,
             command=command,
             exit_code=result.exit_code,
             duration_s=f"{result.duration:.1f}",
@@ -187,9 +188,9 @@ def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -
     issue = task.issue
     cfg = deps.config.build
     start = STEPS.index(rec.step) if resume and rec.step in STEPS else 0
-    logs.event("phase_start", issue.identifier, phase="build", round=rec.round, resume=resume)
+    logs.event("phase_start", issue.ref, phase="build", round=rec.round, resume=resume)
 
-    wt = deps.git.ensure_worktree(task.repo, issue.identifier, issue.branch_name)
+    wt = deps.git.ensure_worktree(task.repo, task.worktree_name, issue.branch_name)
     task.check_interrupt()
     existing_pr = deps.codehost.find_open_pr(task.repo, issue.branch_name)
     continuation = existing_pr is not None or rec.pr_number is not None
@@ -206,7 +207,7 @@ def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -
                 deps.runs.write_output(
                     rec.issue, f"build-{rec.round}-setup.txt", f"$ {task.repo.setup}\n{res.output}"
                 )
-                logs.event("setup_result", rec.issue, exit_code=res.exit_code)
+                logs.event("setup_result", rec.ref, exit_code=res.exit_code)
                 if not res.ok:
                     raise Blocked(
                         f"the setup command `{task.repo.setup}` failed ({_failure_text(res)})",
@@ -246,9 +247,7 @@ def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -
                     result=_failure_text(failed),
                     output=tail(failed.output, REPAIR_TAIL_BYTES),
                 )
-                logs.event(
-                    "repair_round", rec.issue, number=rec.repairs_used, command=failed.command
-                )
+                logs.event("repair_round", rec.ref, number=rec.repairs_used, command=failed.command)
                 run_turn(deps, task, rec, session, repair, cfg.timeout_seconds)
     except Blocked as exc:
         close_session(task, session)
@@ -264,9 +263,9 @@ def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -
     # commit ------------------------------------------------------------------------------
     if start <= STEPS.index("commit"):
         set_step(deps, task, rec, "commit")
-        message = f"{issue.identifier}: {issue.title} (round {rec.round})"
+        message = f"#{issue.number}: {issue.title} (round {rec.round})"
         committed = deps.git.commit_all(wt, message)
-        logs.event("commit", rec.issue, created=committed, head=deps.git.head(wt)[:10])
+        logs.event("commit", rec.ref, created=committed, head=deps.git.head(wt)[:10])
         if deps.git.commits_ahead(wt, task.repo) == 0:
             block_issue(
                 deps, issue, rec, "the implementer made no changes to the repository", "", task
@@ -278,21 +277,21 @@ def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -
     if start <= STEPS.index("push"):
         set_step(deps, task, rec, "push")
         deps.git.push_branch(task.repo, wt, issue.branch_name)
-        logs.event("push", rec.issue, branch=issue.branch_name)
+        logs.event("push", rec.ref, branch=issue.branch_name)
 
     # pr ----------------------------------------------------------------------------------
     task.check_interrupt()
     set_step(deps, task, rec, "pr")
-    title = f"{issue.identifier}: {issue.title}"
+    title = f"#{issue.number}: {issue.title}"
     body = pr_body(task, rec)
     deps.runs.write_posted(rec.issue, f"pr-body-round-{rec.round}.md", body)
     pr = deps.codehost.find_open_pr(task.repo, issue.branch_name)
     if pr is None:
         pr = deps.codehost.create_pr(task.repo, issue.branch_name, title, body)
-        logs.event("pr_created", rec.issue, number=pr.number, url=pr.url)
+        logs.event("pr_created", rec.ref, number=pr.number, url=pr.url)
     else:
         deps.codehost.update_pr(task.repo, pr.number, body, title)
-        logs.event("pr_updated", rec.issue, number=pr.number, url=pr.url)
+        logs.event("pr_updated", rec.ref, number=pr.number, url=pr.url)
     rec.pr_number, rec.pr_url = pr.number, pr.url
     task.pr_url = pr.url
     deps.runs.save(rec)
@@ -316,8 +315,8 @@ def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -
     rec.last_build_comment_at = comment.created_at
     deps.runs.save(rec)
     task.finishing = True
-    deps.tracker.set_state(issue.id, IN_REVIEW)
+    swap_state(deps, rec, issue, IN_REVIEW)
     rec.outcome = "in_review"
     rec.step = ""
     deps.runs.save(rec)
-    logs.event("phase_end", issue.identifier, phase="build", round=rec.round, outcome="in_review")
+    logs.event("phase_end", issue.ref, phase="build", round=rec.round, outcome="in_review")

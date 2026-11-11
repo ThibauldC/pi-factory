@@ -8,6 +8,7 @@ offending key by its full dotted path (for example ``repos.pi-relay.chekcs``).
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,15 +24,18 @@ class ConfigError(Exception):
     """The configuration file is invalid. The message names the offending key."""
 
 
-@dataclass(frozen=True)
-class LinearConfig:
-    team: str
-    owner: str
-    auth: str = "oauth"  # "oauth" (client credentials) or "api_key"
+DEFAULT_API_URL = "https://api.github.com"
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 @dataclass(frozen=True)
 class GitHubConfig:
+    """The one GitHub identity: the owner is who gets assigned at gates; the bot is the
+    machine account that comments, pushes and opens PRs."""
+
+    owner: str
+    api_url: str = DEFAULT_API_URL
     bot_name: str = "pi-factory-bot"
     bot_email: str = "pi-factory-bot@users.noreply.github.com"
 
@@ -68,7 +72,8 @@ class BuildConfig:
 @dataclass(frozen=True)
 class RepoConfig:
     key: str
-    url: str
+    repo: str  # "owner/name"
+    url: str  # clone URL
     checks: tuple[str, ...]
     base_branch: str = "main"
     setup: str | None = None
@@ -76,12 +81,19 @@ class RepoConfig:
     design: PhaseSettings = field(default_factory=PhaseSettings)
     build: PhaseSettings = field(default_factory=PhaseSettings)
 
+    @property
+    def owner(self) -> str:
+        return self.repo.split("/", 1)[0]
+
+    @property
+    def name(self) -> str:
+        return self.repo.split("/", 1)[1]
+
 
 @dataclass(frozen=True)
 class FactoryConfig:
-    linear: LinearConfig
+    github: GitHubConfig
     repos: dict[str, RepoConfig]
-    github: GitHubConfig = field(default_factory=GitHubConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     design: DesignConfig = field(default_factory=DesignConfig)
     build: BuildConfig = field(default_factory=BuildConfig)
@@ -198,7 +210,12 @@ def _parse_listen(value: str, path: str) -> tuple[str, int]:
 
 def _parse_repo(key: str, data: Any) -> RepoConfig:
     t = _Table(data, f"repos.{key}")
-    url = t.get("url", "str")
+    if not KEY_RE.match(key):
+        raise ConfigError(f"repos.{key}: the repository key may only use letters, digits, _ . -")
+    repo = t.get("repo", "str")
+    if not REPO_RE.match(repo):
+        raise ConfigError(f"repos.{key}.repo must look like owner/name (got {repo!r})")
+    url = t.get("url", "str", f"https://github.com/{repo}.git")
     base_branch = t.get("base_branch", "str", "main")
     setup = t.get("setup", "str", None)
     checks = t.get("checks", "strlist")
@@ -214,6 +231,7 @@ def _parse_repo(key: str, data: Any) -> RepoConfig:
         )
     return RepoConfig(
         key=key,
+        repo=repo,
         url=url,
         checks=tuple(checks),
         base_branch=base_branch,
@@ -228,23 +246,21 @@ def parse_config(data: dict[str, Any]) -> FactoryConfig:
     """Validate a parsed TOML document and build a :class:`FactoryConfig`."""
     root = _Table(data, "")
 
-    lt = root.table("linear", required=True)
-    auth = lt.get("auth", "str", "oauth")
-    if auth not in ("oauth", "api_key"):
-        raise ConfigError('linear.auth must be "oauth" or "api_key"')
-    linear = LinearConfig(team=lt.get("team", "str"), owner=lt.get("owner", "str"), auth=auth)
-    lt.done()
-
-    gt = root.table("github")
-    defaults = GitHubConfig()
+    gt = root.table("github", required=True)
+    defaults = GitHubConfig(owner="")
+    api_url = gt.get("api_url", "str", defaults.api_url).rstrip("/")
+    if not re.match(r"^https?://", api_url):
+        raise ConfigError("github.api_url must start with http:// or https://")
     github = GitHubConfig(
+        owner=gt.get("owner", "str"),
+        api_url=api_url,
         bot_name=gt.get("bot_name", "str", defaults.bot_name),
         bot_email=gt.get("bot_email", "str", defaults.bot_email),
     )
     gt.done()
 
     ft = root.table("factory")
-    base = FactoryConfig(linear=linear, repos={})
+    base = FactoryConfig(github=github, repos={})
     poll = _positive(
         "factory.poll_interval_seconds",
         ft.get("poll_interval_seconds", "number", base.poll_interval_seconds),
@@ -291,15 +307,22 @@ def parse_config(data: dict[str, Any]) -> FactoryConfig:
     rt = root.table("repos")
     repos = {key: _parse_repo(key, value) for key, value in rt.data.items()}
     root.done()
+    seen_repos: dict[str, str] = {}
+    for key, repo_cfg in repos.items():
+        other = seen_repos.setdefault(repo_cfg.repo.lower(), key)
+        if other != key:
+            raise ConfigError(
+                f"repos.{key}.repo duplicates repos.{other}.repo ({repo_cfg.repo}); "
+                "each GitHub repository may be configured once"
+            )
     if not repos:
         raise ConfigError(
             "the configuration must define at least one repository under [repos.<key>]"
         )
 
     return FactoryConfig(
-        linear=linear,
-        repos=repos,
         github=github,
+        repos=repos,
         dashboard=DashboardConfig(host=host, port=port),
         design=design,
         build=build,

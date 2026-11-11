@@ -15,7 +15,7 @@ from .phases.common import Deps
 from .runs import RunStore
 from .scheduler import Scheduler, install_signal_handlers
 from .secrets import Secrets
-from .tracker.linear import LinearTracker
+from .tracker.github import GitHubTracker
 
 
 @dataclass
@@ -25,18 +25,10 @@ class Services:
 
 
 def build_services(cfg: FactoryConfig, secrets: Secrets, **overrides: Any) -> Services:
-    """Real adapters. ``overrides`` (``linear_api_url``, ``linear_token_url``,
-    ``github_api_url``) exist only so tests can point at fakes."""
-    linear_kw = {
-        k: overrides[v]
-        for k, v in (("api_url", "linear_api_url"), ("token_url", "linear_token_url"))
-        if v in overrides
-    }
-    tracker = LinearTracker(cfg.linear, secrets, **linear_kw)
-    github_kw = {"api_url": overrides["github_api_url"]} if "github_api_url" in overrides else {}
-    codehost = GitHub(secrets, **github_kw)
-    if "repo_slug" in overrides:
-        codehost._slug = overrides["repo_slug"]
+    """Real adapters. ``github_api_url`` exists only so tests can point at a fake."""
+    api_url = overrides.get("github_api_url") or cfg.github.api_url
+    tracker = GitHubTracker(cfg, secrets, api_url=api_url)
+    codehost = GitHub(secrets, api_url=api_url)
     git = GitOps(cfg, token=secrets.github_token)
     runs = RunStore(cfg.runs_dir, cfg.archive_dir)
     return Services(Deps(cfg, tracker, codehost, git, runs), secrets)
@@ -48,7 +40,6 @@ def report(results: list[preflight.CheckResult], out=None) -> bool:
     for r in results:
         print(f"[{'ok' if r.ok else 'FAIL'}] {r.name}: {r.detail}", file=out)
         ok = ok and r.ok
-    print(f"[note] {preflight.GITHUB_INTEGRATION_REMINDER}", file=out)
     return ok
 
 

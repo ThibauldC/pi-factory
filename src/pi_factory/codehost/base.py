@@ -30,6 +30,9 @@ class CodeHost(Protocol):
     def check_access(self, repo: RepoConfig) -> str | None:
         """Return None when the bot can push to the repository, else a problem description."""
 
+    def default_branch(self, repo: RepoConfig) -> str:
+        """The repository's default branch (closing keywords only fire when merged there)."""
+
     def find_open_pr(self, repo: RepoConfig, branch: str) -> PullRequest | None: ...
 
     def create_pr(self, repo: RepoConfig, branch: str, title: str, body: str) -> PullRequest:

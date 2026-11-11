@@ -19,7 +19,7 @@ def spec_text() -> str:
 
 def states_table() -> dict[str, list[str]]:
     rows = {}
-    for line in README.splitlines():
+    for line in README.replace("`", "").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) == 4 and cells[0] not in ("State", "---", "") and not set(cells[0]) <= {"-"}:
             rows[cells[0]] = cells
@@ -39,30 +39,36 @@ def test_states_table_lists_every_required_state_plus_done_and_canceled():
     rows = states_table()
     for state in REQUIRED_STATES:
         assert state in rows, f"{state} missing from the README states table"
-    assert {"Done", "Canceled"} <= set(rows)
+    assert {"Done", "Canceled"} <= set(rows)  # closed issues, not labels
+    assert rows["Done"][1] == "GitHub" and rows["Canceled"][1] == "you"
 
 
 def test_states_table_matches_the_task_lifecycle_spec():
     spec = spec_text()
     rows = states_table()
     # every factory-owned transition in the spec is stated in the README and agrees with it
-    transitions = re.findall(r"^- (.+?) → (.+)$", spec, re.M)
+    transitions = [
+        (src.replace("`", ""), dst.replace("`", ""))
+        for src, dst in re.findall(r"^- (.+?) → (.+)$", spec, re.M)
+    ]
     assert len(transitions) == 5
+    flat_readme = " ".join(README.replace("`", "").split())
     for src, dst in transitions:
         if src.startswith("any active"):
             assert rows[dst][1] == "factory"
             continue
-        assert f"{src} → {dst}" in " ".join(README.split())
+        assert f"{src} → {dst}" in flat_readme
         assert rows[dst][1] == "factory"
     # states humans set vs states the factory sets
-    for human_state in ("Ready for Design", "Ready for Build"):
+    for human_state in ("factory:ready-for-design", "factory:ready-for-build"):
         assert rows[human_state][1] == "you"
-    # the spec's required state list equals the code's
-    required = re.search(r"Ready for Design, Designing, Design Review.*?Blocked", spec, re.S)
+    # the spec's required label list equals the code's
+    required = re.search(r"factory:ready-for-design.*?factory:blocked", spec, re.S)
     assert required
     for state in REQUIRED_STATES:
         assert state in required.group(0)
-    assert "never move" in spec.lower() or "SHALL NOT move an issue to Done" in spec
+    assert "SHALL NOT close or reopen issues" in spec
+    assert "SHALL NOT merge pull requests" in spec
 
 
 def test_docs_mention_the_commands_that_exist():
@@ -73,5 +79,10 @@ def test_docs_mention_the_commands_that_exist():
         "systemctl",
         "tailscale serve",
         "0600",
+        "gh label create",
+        "factory:blocked",
+        "default branch",
+        "Closes #N",
+        "Automatically delete head branches",
     ):
         assert needle in ops

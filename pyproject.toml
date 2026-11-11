@@ -1,7 +1,7 @@
 [project]
 name = "pi-factory"
 version = "0.1.0"
-description = "Lightweight dispatcher that turns Linear issues into reviewed GitHub PRs by driving the pi coding agent."
+description = "Lightweight dispatcher that turns GitHub issues into reviewed pull requests by driving the pi coding agent."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []

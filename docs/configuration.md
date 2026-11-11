@@ -10,26 +10,23 @@ Target repositories need no factory-specific files.
 
 ## factory.toml
 
-Only `[linear]` and at least one `[repos.<key>]` are required. Everything else shows its
-default below.
+Only `[github]` (with `owner`) and at least one `[repos.<key>]` are required. Everything
+else shows its default below.
 
 ```toml
-[linear]
-team = "THI"                  # Linear team key; the team must be public for OAuth apps
-owner = "owner@example.com"   # Linear user (email, display name or id) that gets assigned
-                              # issues in Design Review and Blocked
-auth = "oauth"                # "oauth" (client credentials, default) or "api_key"
-
 [github]
+owner = "olivia"              # GitHub login of the person who gets assigned issues in
+                              # design-review and blocked
+# api_url = "https://api.github.com"
 bot_name = "pi-factory-bot"   # commit author name for factory commits
 bot_email = "123456+pi-factory-bot@users.noreply.github.com"
 
 [factory]
-poll_interval_seconds = 120   # Linear poll interval
+poll_interval_seconds = 120   # GitHub poll interval
 max_concurrent = 2            # global cap on running tasks (one per repo at most)
 pi_path = "~/.pi/agent/bin/pi"
 state_root = "~/factory/state"        # runs/ and archive/ live here
-worktree_root = "~/factory/worktrees"
+worktree_root = "~/factory/worktrees" # <repo key>/<issue number>
 repos_root = "~/factory/repos"        # cached bare clones
 retention_days = 30                   # archived runs older than this are deleted
 dashboard_listen = "127.0.0.1:8787"   # must be a loopback address
@@ -47,9 +44,12 @@ repair_rounds = 2
 # model = "..."
 # thinking = "high"
 
-[repos.pi-relay]              # key = the Linear `repo` label name
-url = "https://github.com/owner/pi-relay.git"
-base_branch = "main"
+[repos.pi-relay]              # the key is yours: used in run directories, worktree paths
+                              # and on the dashboard (letters, digits, _ . -)
+repo = "acme/pi-relay"        # the GitHub repository, as owner/name; issues in it are the work
+# url = "https://github.com/acme/pi-relay.git"   # clone URL; default derived from `repo`
+base_branch = "main"          # must be the repository's default branch, or `Closes #N`
+                              # will not close the issue when the PR merges
 setup = "pnpm install --frozen-lockfile"
 checks = ["pnpm typecheck", "pnpm lint", "pnpm test", "pnpm build"]  # run in order
 env_passthrough = []          # extra environment variable names setup/check/pi may see
@@ -60,21 +60,20 @@ env_passthrough = []          # extra environment variable names setup/check/pi 
 # thinking = "high"
 ```
 
+An issue targets the repository it lives in, so there is no routing label. Two entries must
+not name the same GitHub repository, and `repo` must look like `owner/name`.
+
 Model resolution for each phase is: repository override, then the global phase setting,
 then pi's own default (no `--model` flag is passed).
 
 ## secrets.env
 
 Loaded by systemd as the unit's `EnvironmentFile=` and also read (and permission-checked) by
-the factory. It must be mode 0600 or the factory refuses to start. These values never reach
-pi or check commands.
+the factory. It must be mode 0600 or the factory refuses to start. The value never reaches
+pi, check commands, prompts, logs, run records or the dashboard. There is one secret: the
+factory needs no credentials for any other service.
 
 ```env
-# Linear OAuth app (client credentials), used when linear.auth = "oauth"
-PI_FACTORY_LINEAR_CLIENT_ID=your-client-id
-PI_FACTORY_LINEAR_CLIENT_SECRET=your-client-secret
-# Linear personal API key, used when linear.auth = "api_key"
-# PI_FACTORY_LINEAR_API_KEY=lin_api_xxx
-# Classic `repo` token of the GitHub machine account
+# Classic `repo` token of the GitHub machine account (tracker and code host)
 PI_FACTORY_GITHUB_TOKEN=ghp_xxx
 ```

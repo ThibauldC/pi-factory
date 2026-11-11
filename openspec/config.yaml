@@ -6,10 +6,11 @@ context: |
   service. Keep the idle memory and CPU footprint small and dependencies minimal.
   It drives the separately installed `pi` coding-agent binary as a child process;
   it never embeds, patches or reinstalls pi.
-  v1 integrates Linear (task board) and GitHub (code host). Azure DevOps will be
-  added later, so tracker and code-host access stay behind small adapter interfaces.
+  v1 uses GitHub for both the task board (issues, with `factory:*` state labels and
+  `priority:*` labels) and the code host (pull requests). Linear and Azure DevOps may
+  be added later, so tracker and code-host access stay behind small adapter interfaces.
   The factory never merges PRs, never pushes to a base branch and never deploys.
-  Secrets (Linear, GitHub) are never passed to pi or check commands (environment,
+  The GitHub token is never passed to pi or check commands (environment,
   arguments, prompts) and never written into worktrees. v1 runs as the same Unix
   user as pi, so on-disk secrets stay readable by the agent: an accepted risk.
 

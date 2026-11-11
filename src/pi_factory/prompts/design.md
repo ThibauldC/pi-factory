@@ -7,7 +7,7 @@ Read the code you need (including AGENTS.md or other context files) before you a
 
 ## The issue
 
-Identifier: $identifier
+GitHub issue: $identifier
 Title: $title
 
 $description

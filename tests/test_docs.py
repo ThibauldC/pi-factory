@@ -18,7 +18,9 @@ def block(lang: str) -> str:
 
 def test_documented_factory_toml_validates():
     cfg = parse_config(tomllib.loads(block("toml")))
-    assert cfg.linear.team == "THI"
+    assert cfg.github.owner == "olivia"
+    assert cfg.repos["pi-relay"].repo == "acme/pi-relay"
+    assert cfg.repos["pi-relay"].url == "https://github.com/acme/pi-relay.git"
     assert cfg.repos["pi-relay"].checks[0] == "pnpm typecheck"
     assert cfg.poll_interval_seconds == 120 and cfg.max_concurrent == 2
 
@@ -29,4 +31,4 @@ def test_documented_secrets_env_loads(tmp_path):
     os.chmod(p, 0o600)
     s = load_secrets(p)
     assert s.github_token() == "ghp_xxx"
-    assert s.linear_client_id() == "your-client-id"
+    assert s.has("PI_FACTORY_GITHUB_TOKEN")  # the one and only secret

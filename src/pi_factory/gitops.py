@@ -16,6 +16,7 @@ from pathlib import Path
 from . import logs
 from .childenv import build_child_env
 from .config import FactoryConfig, RepoConfig
+from .naming import issue_ref
 from .secrets import RedactedError
 
 TOKEN_ENV = "PI_FACTORY_GIT_TOKEN"
@@ -43,8 +44,9 @@ class GitOps:
     def bare_path(self, repo: RepoConfig) -> Path:
         return self.config.repos_root / f"{repo.key}.git"
 
-    def worktree_path(self, repo: RepoConfig, issue: str) -> Path:
-        return self.config.worktree_root / repo.key / issue
+    def worktree_path(self, repo: RepoConfig, number: int | str) -> Path:
+        """``<worktree_root>/<repo key>/<issue number>``."""
+        return self.config.worktree_root / repo.key / str(number)
 
     # -- running git -----------------------------------------------------------------------
     def _env(self, with_token: bool) -> dict[str, str]:
@@ -115,10 +117,10 @@ class GitOps:
         return self.git(bare, "rev-parse", "--verify", "--quiet", ref, check=False).returncode == 0
 
     # -- worktrees -------------------------------------------------------------------------
-    def ensure_worktree(self, repo: RepoConfig, issue: str, branch: str) -> Path:
+    def ensure_worktree(self, repo: RepoConfig, number: int | str, branch: str) -> Path:
         """Return the issue's worktree, creating it (and the branch) when needed."""
         bare = self.ensure_clone(repo)
-        wt = self.worktree_path(repo, issue)
+        wt = self.worktree_path(repo, number)
         base_ref = f"refs/remotes/origin/{repo.base_branch}"
         if not self.has_ref(bare, base_ref):
             raise GitError(f"base branch '{repo.base_branch}' not found in {repo.url}")
@@ -133,7 +135,7 @@ class GitOps:
             self.git(bare, "worktree", "add", "--quiet", "-b", branch, str(wt), f"origin/{branch}")
         else:
             self.git(bare, "worktree", "add", "--quiet", "-b", branch, str(wt), base_ref)
-        logs.event("worktree_ready", issue, path=wt, branch=branch)
+        logs.event("worktree_ready", issue_ref(repo.key, int(number)), path=wt, branch=branch)
         return wt
 
     def _advance_untouched_branch(self, wt: Path, base_ref: str) -> None:
@@ -142,9 +144,9 @@ class GitOps:
         if ahead == "0" and not self.status(wt):
             self.git(wt, "reset", "--hard", "--quiet", base_ref)
 
-    def remove_worktree(self, repo: RepoConfig, issue: str, branch: str) -> None:
+    def remove_worktree(self, repo: RepoConfig, number: int | str, branch: str) -> None:
         bare = self.bare_path(repo)
-        wt = self.worktree_path(repo, issue)
+        wt = self.worktree_path(repo, number)
         if bare.exists():
             self.git(bare, "worktree", "remove", "--force", str(wt), check=False)
         shutil.rmtree(wt, ignore_errors=True)

@@ -16,9 +16,6 @@ from pathlib import Path
 DEFAULT_SECRETS_PATH = "~/.config/pi-factory/secrets.env"
 ENV_PREFIX = "PI_FACTORY_"
 
-LINEAR_CLIENT_ID = "PI_FACTORY_LINEAR_CLIENT_ID"
-LINEAR_CLIENT_SECRET = "PI_FACTORY_LINEAR_CLIENT_SECRET"
-LINEAR_API_KEY = "PI_FACTORY_LINEAR_API_KEY"
 GITHUB_TOKEN = "PI_FACTORY_GITHUB_TOKEN"
 
 _MIN_REDACT_LEN = 6
@@ -93,15 +90,6 @@ class Secrets:
         if not value:
             raise SecretsError(f"secret {name} is not set in the secrets file")
         return value
-
-    def linear_client_id(self) -> str:
-        return self._get(LINEAR_CLIENT_ID)
-
-    def linear_client_secret(self) -> str:
-        return self._get(LINEAR_CLIENT_SECRET)
-
-    def linear_api_key(self) -> str:
-        return self._get(LINEAR_API_KEY)
 
     def github_token(self) -> str:
         return self._get(GITHUB_TOKEN)

@@ -15,7 +15,8 @@ All factory settings except secrets SHALL live in one TOML file on the host, at 
 
 ### Requirement: Global settings
 The configuration SHALL cover:
-- the Linear team and owner;
+- the GitHub owner login (the person who gets assigned at gates) and optionally the GitHub API URL (default `https://api.github.com`);
+- the bot's commit name and email;
 - the poll interval and global concurrency cap;
 - the pi binary path;
 - per-phase timeouts, the repair round limit, models and thinking levels;
@@ -26,18 +27,22 @@ The configuration SHALL cover:
 Each setting SHALL have the default given in the specs.
 
 #### Scenario: Minimal config
-- **WHEN** the config file sets only the Linear team, the owner and one repository
+- **WHEN** the config file sets only the GitHub owner, the bot identity and one repository
 - **THEN** the factory starts with a 120-second poll interval, a global cap of 2, 2 repair rounds, a 15-minute design timeout, a 45-minute build turn timeout and 30-day retention
 
 ### Requirement: Per-repository settings
-Each repository entry SHALL be keyed by its `repo` label name. It SHALL define the git clone URL, the base branch, an optional setup command and an ordered list of check commands, and it SHALL accept optional per-phase model and thinking-level overrides.
+Each repository entry SHALL be keyed by a short repository key of the owner's choosing (used in run directories, worktree paths and the dashboard). It SHALL define the GitHub repository as `repo = "owner/name"`, the base branch, an optional setup command and an ordered list of check commands, and it SHALL accept an optional clone URL (default derived from `repo`) and optional per-phase model and thinking-level overrides.
 
 #### Scenario: Repository entry
-- **WHEN** the config contains `[repos.pi-relay]` with `url`, `base_branch = "main"`, `setup`, and `checks = ["pnpm typecheck", "pnpm lint", "pnpm test", "pnpm build"]`
-- **THEN** issues labelled `pi-relay` build against `main`, run that setup, and run those four checks in order
+- **WHEN** the config contains `[repos.pi-relay]` with `repo = "acme/pi-relay"`, `base_branch = "main"`, `setup`, and `checks = ["pnpm typecheck", "pnpm lint", "pnpm test", "pnpm build"]`
+- **THEN** issues in `acme/pi-relay` build against `main`, run that setup, and run those four checks in order
+
+#### Scenario: Clone URL derived
+- **WHEN** a repository entry has no `url`
+- **THEN** the factory clones `https://github.com/acme/pi-relay.git`
 
 ### Requirement: Validation at startup
-The factory SHALL validate the configuration at startup. If any key is unknown, any required field is missing, any type is wrong or the repository list is empty, it SHALL exit with a non-zero status. The error message SHALL name the offending key.
+The factory SHALL validate the configuration at startup. If any key is unknown, any required field is missing, any type is wrong, a `repo` value is not of the form `owner/name`, two entries name the same GitHub repository, or the repository list is empty, it SHALL exit with a non-zero status. The error message SHALL name the offending key.
 
 #### Scenario: Typo in key
 - **WHEN** a repository entry contains `chekcs` instead of `checks`
@@ -46,3 +51,7 @@ The factory SHALL validate the configuration at startup. If any key is unknown, 
 #### Scenario: No checks defined
 - **WHEN** a repository entry has an empty `checks` list
 - **THEN** the factory exits with an error saying that repository needs at least one check command
+
+#### Scenario: Malformed repo
+- **WHEN** a repository entry has `repo = "pi-relay"`
+- **THEN** the factory exits and the error names `repos.pi-relay.repo` and says it must look like `owner/name`

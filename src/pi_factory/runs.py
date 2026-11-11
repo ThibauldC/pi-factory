@@ -2,11 +2,11 @@
 
 Layout under ``<state_root>``::
 
-    runs/<ISSUE>/run.json            the run record
-    runs/<ISSUE>/sessions/           pi session files
-    runs/<ISSUE>/commands/           output of every setup and check command
-    runs/<ISSUE>/posted/             copies of every comment and PR body the factory posted
-    archive/<ISSUE>--<stamp>/        cleaned-up runs, pruned after the retention period
+    runs/<KEY>/run.json              the run record (KEY is the issue key, e.g. pi-relay-123)
+    runs/<KEY>/sessions/           pi session files
+    runs/<KEY>/commands/           output of every setup and check command
+    runs/<KEY>/posted/             copies of every comment and PR body the factory posted
+    archive/<KEY>--<stamp>/        cleaned-up runs, pruned after the retention period
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ def utcnow() -> str:
 
 @dataclass
 class RunRecord:
-    issue: str
-    repo: str
-    issue_id: str = ""
+    issue: str  # the issue key, e.g. "pi-relay-123" (also the run directory name)
+    repo: str  # the repository key
+    issue_number: int = 0
     branch: str = ""
     title: str = ""
     issue_url: str = ""
@@ -56,10 +56,17 @@ class RunRecord:
     last_build_comment_at: str | None = None
     repairs_used: int = 0
     checks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    outcome: str = ""  # "", "designed", "in_review", "blocked", "canceled"
+    outcome: str = ""  # "", "designed", "in_review", "blocked"
     outcome_detail: str = ""
+    swap: dict[str, str] | None = None  # {"from": label, "to": label} while a swap is running
+    close_reason: str = ""  # "completed" or "not_planned" once the issue is closed
     started_at: str = field(default_factory=utcnow)
     updated_at: str = field(default_factory=utcnow)
+
+    @property
+    def ref(self) -> str:
+        """The issue reference, e.g. ``pi-relay#123``."""
+        return f"{self.repo}#{self.issue_number}" if self.issue_number else self.issue
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

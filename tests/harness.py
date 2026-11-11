@@ -1,4 +1,4 @@
-"""A complete in-process factory environment built from the fakes (Linear, GitHub, pi, git)."""
+"""A complete in-process factory environment built from the fakes (GitHub, pi, git)."""
 
 from __future__ import annotations
 
@@ -11,19 +11,13 @@ from pi_factory.gitops import GitOps
 from pi_factory.phases.common import Deps, Task
 from pi_factory.runs import RunStore
 from pi_factory.secrets import Secrets
-from pi_factory.tracker.linear import LinearTracker
+from pi_factory.tracker.github import GitHubTracker
 
 from .conftest import FakePi
 from .fakes.github import FakeGitHub
-from .fakes.linear import FakeLinear
 from .gitfix import make_config, make_remote
 
-SECRET_VALUES = {
-    "PI_FACTORY_LINEAR_CLIENT_ID": "cid",
-    "PI_FACTORY_LINEAR_CLIENT_SECRET": "csecret",
-    "PI_FACTORY_LINEAR_API_KEY": "lin_api_secretkey",
-    "PI_FACTORY_GITHUB_TOKEN": "ghp_bottoken",
-}
+SECRET_VALUES = {"PI_FACTORY_GITHUB_TOKEN": "ghp_bottoken"}
 
 
 class Env:
@@ -38,7 +32,6 @@ class Env:
     ):
         self.root = root
         root.mkdir(parents=True, exist_ok=True)
-        self.linear = FakeLinear(repo_labels=repos).start()
         self.github = FakeGitHub(repos={f"owner/{r}": True for r in repos}).start()
         self.remotes = {r: make_remote(root, r) for r in repos}
         self.pi = FakePi(root / "fakepi", pi_turns)
@@ -53,30 +46,29 @@ class Env:
         cfg = dataclasses.replace(cfg, pi_path=self.pi.path, design=design, build=build)
         self.cfg: FactoryConfig = dataclasses.replace(cfg, **config_overrides)
         secrets = Secrets(SECRET_VALUES)
-        self.tracker = LinearTracker(
-            self.cfg.linear, secrets, api_url=self.linear.api_url, token_url=self.linear.token_url
-        )
-        self.codehost = GitHub(
-            secrets,
-            api_url=self.github.api_url,
-            mergeable_retry_delay=0,
-            repo_slug=lambda r: ("owner", r.key),
-        )
+        self.tracker = GitHubTracker(self.cfg, secrets, api_url=self.github.api_url)
+        self.codehost = GitHub(secrets, api_url=self.github.api_url, mergeable_retry_delay=0)
         self.git = GitOps(self.cfg, token=secrets.github_token)
         self.runs = RunStore(self.cfg.runs_dir, self.cfg.archive_dir)
         self.deps = Deps(self.cfg, self.tracker, self.codehost, self.git, self.runs)
 
     def close(self) -> None:
-        self.linear.stop()
         self.github.stop()
 
     # -- helpers ---------------------------------------------------------------------------
-    def fetch_issue(self, identifier: str):
-        issues = self.tracker.list_issues([i["id"] for i in self.linear.issues.values()])
-        return next(i for i in issues if i.identifier == identifier)
+    def key(self, number: int = 1, repo: str = "pi-relay") -> str:
+        return f"{repo}-{number}"
 
-    def task(self, identifier: str, phase: str, repo: str = "pi-relay") -> Task:
-        return Task(self.fetch_issue(identifier), self.cfg.repos[repo], phase)
+    def fetch_issue(self, number: int = 1, repo: str = "pi-relay"):
+        return self.tracker.get_issue(repo, number)
 
-    def seed_issue(self, identifier="THI-1", state="Ready for Design", **kw) -> str:
-        return self.linear.add_issue(identifier, state=state, **kw)
+    def task(self, number: int = 1, phase: str = "design", repo: str = "pi-relay") -> Task:
+        return Task(self.fetch_issue(number, repo), self.cfg.repos[repo], phase)
+
+    def seed_issue(self, number: int = 1, state: str | None = "ready-for-design", **kw) -> int:
+        if "description" in kw:
+            kw["body"] = kw.pop("description")
+        return self.github.add_issue(number, state=state, **kw)
+
+    def worktree(self, number: int = 1, repo: str = "pi-relay") -> Path:
+        return self.git.worktree_path(self.cfg.repos[repo], number)

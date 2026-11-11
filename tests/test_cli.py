@@ -42,20 +42,14 @@ class Setup:
         self.secrets = tmp_path / "secrets.env"
         self.write_config()
         self.write_secrets()
-        self.overrides = {
-            "linear_api_url": env.linear.api_url,
-            "linear_token_url": env.linear.token_url,
-            "github_api_url": env.github.api_url,
-            "repo_slug": lambda r: ("owner", r.key),
-        }
+        self.overrides = {"github_api_url": env.github.api_url}
 
     def write_config(self, extra_repo="", pi_path=None, state_root=None):
         cfg = self.env.cfg
         self.config.write_text(
             f"""
-[linear]
-team = "THI"
-owner = "owner@example.com"
+[github]
+owner = "olivia"
 [factory]
 pi_path = "{pi_path or self.env.pi.path}"
 state_root = "{state_root or cfg.state_root}"
@@ -64,6 +58,7 @@ repos_root = "{cfg.repos_root}"
 poll_interval_seconds = 0.2
 dashboard_listen = "127.0.0.1:{self.port}"
 [repos.pi-relay]
+repo = "owner/pi-relay"
 url = "{self.env.remotes["pi-relay"]}"
 checks = ["true"]
 {extra_repo}
@@ -72,10 +67,7 @@ checks = ["true"]
 
     def write_secrets(self, text=None, mode=0o600):
         self.secrets.write_text(
-            text
-            if text is not None
-            else "PI_FACTORY_LINEAR_CLIENT_ID=cid\nPI_FACTORY_LINEAR_CLIENT_SECRET=csecret\n"
-            "PI_FACTORY_GITHUB_TOKEN=ghp_bottoken\n"
+            text if text is not None else "PI_FACTORY_GITHUB_TOKEN=ghp_bottoken\n"
         )
         os.chmod(self.secrets, mode)
 
@@ -95,11 +87,14 @@ def cli(make_env, tmp_path):
 def test_check_passes_when_every_prerequisite_is_in_place(cli, capsys):
     assert cli.main("check") == 0
     out = capsys.readouterr().out
-    for name in ("secrets", "pi binary", "directories", "linear", "github:pi-relay"):
+    for name in (
+        "secrets", "pi binary", "directories", "github issues", "github:pi-relay",
+        "base-branch:pi-relay",
+    ):  # fmt: skip
         assert f"[ok] {name}" in out
     assert "fake-pi 1.2.3" in out  # the pi version is reported
-    assert "GitHub integration" in out  # reminder about what cannot be verified
-    assert cli.env.linear.ops("Issues") == []  # check never polls for work
+    assert "'main' is the default branch" in out
+    assert cli.env.github.calls_to("GET", r"/issues\?") == []  # check never polls for work
 
 
 def test_check_fails_for_a_missing_secrets_file(cli, capsys):
@@ -115,7 +110,7 @@ def test_check_fails_for_open_secrets_permissions(cli, capsys):
 
 
 def test_check_fails_for_a_missing_required_secret(cli, capsys):
-    cli.write_secrets("PI_FACTORY_GITHUB_TOKEN=ghp_bottoken\n")
+    cli.write_secrets("SOMETHING_ELSE=1\n")
     assert cli.main("check") == 1
     assert "[FAIL] secrets" in capsys.readouterr().out
 
@@ -132,25 +127,46 @@ def test_check_fails_for_a_missing_pi_binary(cli, capsys, tmp_path):
     assert "[FAIL] pi binary" in capsys.readouterr().out
 
 
-def test_check_fails_for_a_missing_linear_state(cli, capsys):
-    cli.env.linear.states = [s for s in cli.env.linear.states if s["name"] != "Blocked"]
+def test_check_fails_for_a_missing_state_label_naming_repo_and_label(cli, capsys):
+    cli.env.github.labels_of("owner/pi-relay").remove("factory:blocked")
     assert cli.main("check") == 1
     out = capsys.readouterr().out
-    assert "[FAIL] linear" in out and "Blocked" in out
+    assert "[FAIL] github issues" in out and "owner/pi-relay" in out and "factory:blocked" in out
 
 
-def test_check_fails_for_a_missing_repo_label_and_unknown_owner(cli, capsys):
-    cli.env.linear.labels.clear()
-    cli.env.linear.users.clear()
+def test_check_warns_about_missing_priority_labels_but_passes(cli, capsys):
+    cli.env.github.labels["owner/pi-relay"] = [
+        n for n in cli.env.github.labels_of("owner/pi-relay") if not n.startswith("priority:")
+    ]
+    assert cli.main("check") == 0
+    assert "warning: owner/pi-relay has no priority labels" in capsys.readouterr().out
+
+
+def test_check_fails_for_an_owner_who_cannot_be_assigned(cli, capsys):
+    cli.env.github.assignable.clear()
     assert cli.main("check") == 1
+    assert "'olivia' cannot be assigned" in capsys.readouterr().out
+
+
+def test_check_warns_when_base_branch_is_not_the_default_branch(cli, capsys):
+    cli.env.github.default_branches["owner/pi-relay"] = "trunk"
+    assert cli.main("check") == 0
     out = capsys.readouterr().out
-    assert "pi-relay" in out and "owner@example.com" in out
+    assert "warning: base_branch 'main' is not the default branch 'trunk'" in out
+    assert "Closes #N" in out
+
+
+def test_check_fails_when_issues_are_disabled(cli, capsys):
+    cli.env.github.has_issues["owner/pi-relay"] = False
+    assert cli.main("check") == 1
+    assert "issues are disabled" in capsys.readouterr().out
 
 
 def test_check_fails_when_the_bot_cannot_access_a_repo(cli, capsys):
     cli.env.github.repos.clear()
     assert cli.main("check") == 1
-    assert "[FAIL] github:pi-relay" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "[FAIL] github:pi-relay" in out and "lacks access to owner/pi-relay" in out
 
 
 def test_check_fails_when_the_state_directory_is_not_writable(cli, capsys, tmp_path):
@@ -170,19 +186,19 @@ def test_check_reports_every_failure_in_one_pass(cli, capsys, tmp_path):
 
 
 def test_run_exits_nonzero_without_polling_when_a_prerequisite_is_missing(cli):
-    cli.env.linear.states = [s for s in cli.env.linear.states if s["name"] != "Design Review"]
+    cli.env.github.labels_of("owner/pi-relay").remove("factory:design-review")
     assert cli.main("run") == 1
-    assert cli.env.linear.ops("Issues") == []
+    assert cli.env.github.calls_to("GET", r"/issues\?") == []
 
 
 def test_run_polls_serves_dashboard_and_exits_cleanly_on_sigterm(cli):
     env = cli.env
-    env.seed_issue("THI-1")
+    env.seed_issue(1)
     old = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
     seen = {}
 
     def watcher():
-        wait_for(lambda: env.linear.issue("THI-1")["state"] == "Design Review", timeout=30)
+        wait_for(lambda: env.github.state(1) == "design-review", timeout=30)
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{cli.port}/", timeout=5) as r:
                 seen["dashboard"] = r.read().decode()
@@ -199,5 +215,5 @@ def test_run_polls_serves_dashboard_and_exits_cleanly_on_sigterm(cli):
         signal.signal(signal.SIGINT, old[1])
     t.join(10)
     assert code == 0
-    assert env.linear.issue("THI-1")["state"] == "Design Review"
+    assert env.github.state(1) == "design-review"
     assert "pi-factory" in seen["dashboard"] and "pi-relay" in seen["dashboard"]
