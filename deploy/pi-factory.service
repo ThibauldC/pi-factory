@@ -1,0 +1,30 @@
+[Unit]
+Description=pi-factory: turn Linear issues into reviewed GitHub PRs by driving pi
+Documentation=https://github.com/owner/pi-factory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/git/pi-factory
+# Secrets (mode 0600). The factory also re-checks the mode itself and refuses to start otherwise.
+EnvironmentFile=/home/ubuntu/.config/pi-factory/secrets.env
+ExecStart=/home/ubuntu/git/pi-factory/.venv/bin/pi-factory run --config /home/ubuntu/.config/pi-factory/factory.toml
+Restart=on-failure
+RestartSec=10
+
+# pi-relay must win under contention: low CPU priority, and a memory ceiling for the whole
+# cgroup (the factory plus every pi and check process it starts).
+Nice=10
+CPUWeight=50
+MemoryHigh=4G
+MemoryMax=6G
+
+# On stop the factory gets SIGTERM, closes pi's stdin and leaves run records at their step so
+# the next start can resume them. Only after the timeout is anything killed.
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
