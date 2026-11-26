@@ -31,8 +31,18 @@ The build prompt SHALL contain the issue, the recorded design, the trusted human
 - **WHEN** the implementer session finishes a turn
 - **THEN** its changes are present as uncommitted modifications in the worktree, ready for the factory to check
 
+### Requirement: Build blocker reported by the implementer
+The build and repair prompts SHALL instruct the implementer to report missing human input in a
+single public-safe `BLOCKED:` line stating the reason and the input needed. On receiving one, the
+factory SHALL post the explanation, retain the worktree, and move the issue to `factory:blocked`
+without running further checks, committing, or pushing.
+
+#### Scenario: Human answers a build blocker
+- **WHEN** a trusted human replies and sets `factory:ready-for-build`
+- **THEN** the next build uses the same worktree and sees the previous blocker and the reply; a reply alone does not start a build
+
 ### Requirement: Factory-run checks
-After each implementation or repair turn, the factory SHALL run the repository's configured check commands in order in the worktree. It SHALL record each command's exit code, duration and trimmed output. The checks pass only if every command exits with 0.
+After each implementation or repair turn that does not report a blocker, the factory SHALL run the repository's configured check commands in order in the worktree. It SHALL record each command's exit code, duration and trimmed output. The checks pass only if every command exits with 0.
 
 #### Scenario: All checks pass
 - **WHEN** every configured check command exits with 0

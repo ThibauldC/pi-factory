@@ -122,11 +122,13 @@ On a public repository, read an issue before you label it: the issue body is not
 | Merge the PR | GitHub closes the issue through `Closes #N`; the factory removes the worktree and archives the run. |
 | Remove or replace `factory:designing` / `factory:building`, or close the issue | Stops the run within one poll; posts nothing. |
 
-An issue in `factory:blocked` has a comment saying why and how to retry: fix the cause, then
-replace the label with `factory:ready-for-design` or `factory:ready-for-build`. Comment text
-is never treated as a command; only the state labels and whether the issue is open drive the
-factory. Only comments from the repository owner, members and collaborators are passed to
-the agent. The factory reads issue comments only, not pull request review comments.
+An issue in `factory:blocked` has a comment saying why and how to retry. If the build agent
+needs a decision or missing information, it posts the blocker instead of committing or pushing
+partial work. Reply on the issue, then replace `factory:blocked` with `factory:ready-for-build`
+to retry in the same worktree with the blocker and your answer. Use `factory:ready-for-design`
+if the design needs to change. Commenting alone never restarts a run. Only comments from the
+repository owner, members and collaborators are passed to the agent as human input. The factory
+reads issue comments only, not pull request review comments.
 
 If you give an issue two `factory:*` labels, it is ignored (and listed on the dashboard) until
 you remove one.

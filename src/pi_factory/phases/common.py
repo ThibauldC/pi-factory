@@ -254,7 +254,8 @@ def block_issue(
     if details.strip():
         body += f"\n\n```\n{details.strip()}\n```"
     body += (
-        f"\n\nTo retry, replace the `factory:blocked` label with `{retry}` "
+        "\n\nIf the factory needs an answer, reply on this issue first. "
+        f"To retry, replace the `factory:blocked` label with `{retry}` "
         f"(or with `{READY_FOR_DESIGN}` to redesign)."
     )
     post_comment(deps, issue, rec, f"blocked-{rec.phase}-{rec.round}", body)
