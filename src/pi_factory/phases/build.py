@@ -8,7 +8,9 @@ from typing import Any
 
 from .. import logs
 from ..commands import tail
+from ..pi_rpc import PiSession
 from ..runs import STEPS, RunRecord
+from ..secrets import redact
 from ..tracker.base import IN_REVIEW
 from .common import (
     Blocked,
@@ -18,6 +20,7 @@ from .common import (
     close_session,
     format_comments,
     human_comments,
+    marker,
     open_session,
     post_comment,
     render_prompt,
@@ -66,9 +69,17 @@ def build_prompt(deps: Deps, task: Task, rec: RunRecord, continuation: bool) -> 
         continuation_block = (
             "\n## This is a continuation\n\n"
             "A pull request already exists for this branch and the work from earlier rounds is "
-            "already in the working tree (committed). A reviewer asked for changes: address the "
-            "comments above, which were posted since the previous build.\n"
+            "already committed. Address any feedback or clarification above.\n"
         )
+    previous_block = "— " + marker(rec.issue, f"blocked-build-{rec.round - 1}")
+    blocker = next(
+        (
+            c.body.partition("\n")[0]
+            for c in reversed(task.issue.comments)
+            if c.is_bot and c.created_at >= design_at and c.body.rstrip().endswith(previous_block)
+        ),
+        "",
+    )
     return render_prompt(
         "build",
         repo=task.repo.key,
@@ -78,6 +89,7 @@ def build_prompt(deps: Deps, task: Task, rec: RunRecord, continuation: bool) -> 
         title=task.issue.title,
         description=task.issue.description or "(no description)",
         design=design or "(no design was recorded; implement the issue description above)",
+        blocker_block=f"\n## Previous build blocker\n\n{blocker}\n" if blocker else "",
         comments_block=comments_block,
         continuation_block=continuation_block,
         check_list="\n".join(f"  {i}. `{c}`" for i, c in enumerate(task.repo.checks, 1)),
@@ -183,6 +195,20 @@ def _failure_text(result) -> str:
     return f"exit code {result.exit_code}"
 
 
+def _implementer_turn(
+    deps: Deps, task: Task, rec: RunRecord, session: PiSession, message: str
+) -> None:
+    result = run_turn(deps, task, rec, session, message, deps.config.build.timeout_seconds)
+    first_line = result.text.strip().splitlines()[:1]
+    if first_line and first_line[0].startswith("BLOCKED:"):
+        reason = redact(first_line[0].removeprefix("BLOCKED:").strip())[:450]
+        raise Blocked(
+            f"the implementer reported a blocker: {reason}"
+            if reason
+            else "the implementer stopped without explaining what it needs"
+        )
+
+
 def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -> None:
     """Run (or, with ``resume``, continue from ``rec.step``) one build round."""
     issue = task.issue
@@ -223,7 +249,7 @@ def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -
                     message = render_prompt("resume")
                 else:
                     message = build_prompt(deps, task, rec, continuation)
-                run_turn(deps, task, rec, session, message, cfg.timeout_seconds)
+                _implementer_turn(deps, task, rec, session, message)
 
             # checks, with bounded repair rounds on the same session ---------------------
             while True:
@@ -248,7 +274,7 @@ def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -
                     output=tail(failed.output, REPAIR_TAIL_BYTES),
                 )
                 logs.event("repair_round", rec.ref, number=rec.repairs_used, command=failed.command)
-                run_turn(deps, task, rec, session, repair, cfg.timeout_seconds)
+                _implementer_turn(deps, task, rec, session, repair)
     except Blocked as exc:
         close_session(task, session)
         task.check_interrupt()
@@ -268,7 +294,11 @@ def run_build(deps: Deps, task: Task, rec: RunRecord, *, resume: bool = False) -
         logs.event("commit", rec.ref, created=committed, head=deps.git.head(wt)[:10])
         if deps.git.commits_ahead(wt, task.repo) == 0:
             block_issue(
-                deps, issue, rec, "the implementer made no changes to the repository", "", task
+                deps,
+                issue,
+                rec,
+                "the implementer made no changes and did not report a blocker",
+                task=task,
             )
             return
 

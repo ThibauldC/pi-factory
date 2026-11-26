@@ -14,7 +14,11 @@ below in the repository checked out in your working directory (repository `$repo
 - When you think you are done, run the repository's checks yourself and fix what fails. The factory
   will run them again, in this order, and every one must exit with status 0:
 $check_list
-- Finish with a short plain-text summary of what you changed (no Markdown headings needed).
+- If you cannot safely finish without human input, stop and make your final response a single
+  plain-text line starting with `BLOCKED:`. State the concrete reason and ask for the decision or
+  information you need. This line will be posted on the issue; do not include secrets, private
+  diagnostics, or logs. Report the blocker even if you made partial changes.
+- Otherwise, finish with a short plain-text summary of what you changed (no Markdown headings needed).
 
 ## The issue
 
@@ -26,4 +30,4 @@ $description
 ## The approved design
 
 $design
-$comments_block$continuation_block
+$blocker_block$comments_block$continuation_block

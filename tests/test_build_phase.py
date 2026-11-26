@@ -1,8 +1,10 @@
 import dataclasses
 
+from pi_factory import secrets
 from pi_factory.phases.build import run_build
 from pi_factory.phases.common import begin_phase
 from pi_factory.phases.design import run_design
+from pi_factory.scheduler import Scheduler
 
 from .gitfix import run as git
 
@@ -214,8 +216,59 @@ def test_no_changes_at_all_blocks(make_env):
     env = setup_env(make_env, [{}])
     task, rec = build(env)
     assert env.github.state(1) == "blocked"
-    assert "no changes" in env.github.comments(1)[-1]["body"]
+    assert "no changes and did not report a blocker" in env.github.comments(1)[-1]["body"]
     assert env.github.open_prs() == []
+
+
+def test_build_waits_for_label_then_retries_with_blocker_and_answer(make_env):
+    secrets.register_secret("test-sensitive-value")
+    env = setup_env(
+        make_env,
+        [
+            {
+                "text": "BLOCKED: Which retry limit should we use? test-sensitive-value\n"
+                "Private log",
+                "edits": {"partial.txt": "keep me"},
+            },
+            {"edits": {"complete.txt": "3 retries"}},
+        ],
+        checks=["test -f partial.txt && test -f complete.txt"],
+    )
+    task, rec = build(env)
+    wt = env.git.worktree_path(task.repo, 1)
+    body = env.github.comments(1)[-1]["body"]
+    assert "Which retry limit should we use? [redacted]" in body
+    assert "test-sensitive-value" not in body and "Private log" not in body
+    assert "reply on this issue" in body and "factory:ready-for-build" in body
+    assert env.github.state(1) == "blocked" and not rec.checks
+    assert (wt / "partial.txt").exists() and env.git.commits_ahead(wt, task.repo) == 0
+    assert remote_refs(env) == ["refs/heads/main"] and not env.github.open_prs()
+
+    env.github.add_comment(1, "Use three retries.")
+    env.github.add_comment(1, "UNTRUSTED ANSWER", login="stranger", association="NONE")
+    scheduler = Scheduler(env.deps)
+    assert scheduler.poll_once() and scheduler.wait_idle(10)
+    assert env.github.state(1) == "blocked" and len(env.pi.prompts()) == 2
+
+    env.github.move(1, "ready-for-build")
+    assert scheduler.poll_once() and scheduler.wait_idle(10)
+    prompt = env.pi.prompts()[-1]
+    assert "Which retry limit should we use?" in prompt and "Use three retries." in prompt
+    assert "UNTRUSTED ANSWER" not in prompt
+    assert env.github.state(1) == "in-review" and len(env.github.open_prs()) == 1
+
+
+def test_repair_can_stop_to_ask_for_input(make_env):
+    env = setup_env(
+        make_env,
+        [{"edits": {"a.txt": "1"}}, {"text": "BLOCKED: Which fixture should replace this one?"}],
+        checks=["false"],
+    )
+    _, rec = build(env)
+    assert env.github.state(1) == "blocked"
+    assert "Which fixture should replace this one?" in env.github.comments(1)[-1]["body"]
+    assert rec.repairs_used == 1 and len(rec.checks["1"]) == 1
+    assert remote_refs(env) == ["refs/heads/main"] and not env.github.open_prs()
 
 
 def test_agent_commits_are_kept_with_factory_commit_on_top(make_env):
